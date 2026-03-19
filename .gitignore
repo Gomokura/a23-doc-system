@@ -1,0 +1,38 @@
+# 环境变量（绝对不能提交！）
+.env
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 数据库文件
+db/chroma/
+db/*.db
+
+# 上传/输出文件
+uploads/
+outputs/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# 系统文件
+.DS_Store
+Thumbs.db
+*.exe
+python-3.11.9.exe
+
+# 依赖安装目录
+*.egg-info/
+dist/
+build/
