@@ -9,7 +9,7 @@ import json
 
 from db.database import get_db
 from db.models import FileRecord
-from main import AppError
+from errors import AppError
 
 router = APIRouter(tags=["智能问答"])
 

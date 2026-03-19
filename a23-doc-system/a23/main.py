@@ -9,21 +9,12 @@ from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 from config import settings
-from db.database import init_db
+from db.database import init_db, check_db_health
 from api.upload import router as upload_router
 from api.query import router as query_router
 from api.fill import router as fill_router
 from api.files import router as files_router
-
-
-# ── 全局异常类 ────────────────────────────────────────────────
-class AppError(Exception):
-    def __init__(self, status_code: int, error_code: str, detail: str):
-        self.status_code = status_code
-        self.error_code  = error_code
-        self.detail      = detail
-
-
+from errors import AppError
 # ── 启动/关闭生命周期 ──────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -86,7 +77,27 @@ app.include_router(files_router)
 # ── 健康检查 ──────────────────────────────────────────────────
 @app.get("/health", tags=["系统"])
 async def health():
-    return {"status": "ok", "version": "1.0.0"}
+    db_status = check_db_health()
+    now = datetime.now(timezone.utc).isoformat()
+
+    if not db_status["ok"]:
+        # 依赖挂掉返回 503
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status":    "degraded",
+                "version":   "1.0.0",
+                "timestamp": now,
+                "database":  db_status,
+            },
+        )
+
+    return {
+        "status":    "ok",
+        "version":   "1.0.0",
+        "timestamp": now,
+        "database":  db_status,
+    }
 
 
 # ── 启动入口 ──────────────────────────────────────────────────
