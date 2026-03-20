@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     bm25_weight:   float = 0.4
     top_k:         int   = 5
 
+    # ChromaDB 高级配置 ⭐ NEW
+    chroma_distance_metric: str = "cosine"  # 距离度量: cosine(余弦) | l2(欧氏) | ip(内积)
+    chroma_batch_size: int = 128  # ChromaDB 批量处理大小
+    chroma_n_results: int = 10  # 默认检索数量（会乘以 top_k）
+
+    # ReRanker 配置 ⭐ NEW
+    reranker_enabled: bool = True  # 是否启用 CrossEncoder 重排序
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # CrossEncoder 模型
+    reranker_top_k: int = 5  # ReRanker 保留结果数
+
     # 服务配置
     host: str = "0.0.0.0"
     port: int = 8000
