@@ -3,6 +3,7 @@
 函数签名已锁定，不得更改
 """
 import concurrent.futures
+import hashlib
 import time
 from typing import Optional, Callable, Tuple, Dict, List
 
