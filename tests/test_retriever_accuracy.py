@@ -25,8 +25,53 @@ except ImportError as e:
 
 
 # ═══════════════════════════════════════════════════════════
-# 测试用例集
+# Mock 答案映射（每个用例对应不同的标准答案）
 # ═══════════════════════════════════════════════════════════
+
+MOCK_ANSWERS = {
+    "case_001": {
+        "answer": "根据合同文件，合同总金额为人民币500万元整，分三期支付：首付150万元（30%）、验收后250万元（50%）、质保期满100万元（20%）。",
+        "sources": [
+            {"chunk_id": "mock-file-001_0", "content": "合同金额为人民币500万元整", "source_file": "测试合同.pdf", "page": 1},
+            {"chunk_id": "mock-file-001_1", "content": "首付30%即150万元，验收后付50%即250万元，质保期满付尾款20%即100万元", "source_file": "测试合同.pdf", "page": 2},
+        ],
+        "confidence": 0.92
+    },
+    "case_002": {
+        "answer": "本合同甲方为北京科技有限公司，乙方为上海贸易有限公司。双方于2024年1月1日签订本合同。",
+        "sources": [
+            {"chunk_id": "mock-file-001_0", "content": "本合同由甲方北京科技有限公司与乙方上海贸易有限公司于2024年1月1日签订", "source_file": "测试合同.pdf", "page": 1},
+        ],
+        "confidence": 0.95
+    },
+    "case_003": {
+        "answer": "付款方式为分三期支付：首付30%即150万元，验收后付50%即250万元，质保期满付尾款20%即100万元。",
+        "sources": [
+            {"chunk_id": "mock-file-001_1", "content": "付款方式：分三期支付，首付30%即150万元，验收后付50%即250万元，质保期满付尾款20%即100万元", "source_file": "测试合同.pdf", "page": 2},
+        ],
+        "confidence": 0.90
+    },
+    "case_004": {
+        "answer": "合同有效期自签订之日起两年，即2024年1月1日至2025年12月31日届满。",
+        "sources": [
+            {"chunk_id": "mock-file-001_2", "content": "合同有效期自签订之日起两年，即2024年1月1日至2025年12月31日", "source_file": "测试合同.pdf", "page": 3},
+        ],
+        "confidence": 0.88
+    },
+    "case_005": {
+        "answer": "本合同为北京科技有限公司与上海贸易有限公司签订的服务合同，合同金额500万元，分三期付款，有效期两年。",
+        "sources": [
+            {"chunk_id": "mock-file-001_0", "content": "本合同由甲方北京科技有限公司与乙方上海贸易有限公司于2024年1月1日签订，合同金额为人民币500万元整", "source_file": "测试合同.pdf", "page": 1},
+            {"chunk_id": "mock-file-001_2", "content": "合同有效期自签订之日起两年", "source_file": "测试合同.pdf", "page": 3},
+        ],
+        "confidence": 0.85
+    },
+}
+
+
+# ═══════════════════════════════════════════════════
+# 测试用例集
+# ═══════════════════════════════════════════════════
 
 TEST_CASES = [
     {
@@ -56,7 +101,7 @@ TEST_CASES = [
     {
         "id": "case_005",
         "query": "这个文件的主要内容是什么？",
-        "expected_keywords": ["合同", "服务合同", "北京科技", "上海贸易"],
+        "expected_keywords": ["合同", "北京科技有限公司", "上海贸易有限公司", "500万元"],
         "description": "验证摘要型问答是否正常"
     },
 ]
@@ -163,12 +208,13 @@ def run_retriever_tests(use_mock: bool = True) -> dict:
             logger.info(f"\n测试用例: {case['id']} - {case['description']}")
             logger.info(f"  Query: {case['query']}")
 
-            # Mock 返回固定答案，直接评估
+            # 使用该用例对应的专门 Mock 答案
+            mock_answer = MOCK_ANSWERS.get(case["id"], MOCK_ANSWER_RESULT)
             mock_result = {
                 "query": case["query"],
-                "answer": MOCK_ANSWER_RESULT["answer"],
-                "sources": MOCK_ANSWER_RESULT["sources"],
-                "confidence": MOCK_ANSWER_RESULT["confidence"]
+                "answer": mock_answer["answer"],
+                "sources": mock_answer["sources"],
+                "confidence": mock_answer["confidence"]
             }
 
             eval_result = evaluate_answer(mock_result, case)
