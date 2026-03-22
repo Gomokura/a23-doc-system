@@ -434,6 +434,15 @@ def retrieve_and_answer(query: str, file_ids: list, scenario: str = "default") -
     """
     logger.info(f"收到问答请求: query={query}, file_ids={file_ids}")
 
+    # 缓存检查
+    from modules.cache.redis_client import get_cached_result, set_cached_result
+    cache_key_raw = f"{query}|{sorted(file_ids)}|{scenario}"
+    query_hash = hashlib.md5(cache_key_raw.encode()).hexdigest()
+    cached = get_cached_result(query_hash)
+    if cached:
+        logger.info("返回缓存结果，跳过检索")
+        return cached
+
     try:
         # ═══════════════════════════════════════════════════════════════
         # 并行检索：向量检索 + BM25 同步执行，节省 40-50% 时间
@@ -565,6 +574,9 @@ def retrieve_and_answer(query: str, file_ids: list, scenario: str = "default") -
         }
 
         logger.info(f"问答完成: confidence={result['confidence']}, has_conflicts={fusion_info['has_conflicts']}")
+
+        # 写入缓存
+        set_cached_result(query_hash, result)
         return result
 
     except Exception as e:
