@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # CrossEncoder 模型
     reranker_top_k: int = 5  # ReRanker 保留结果数
 
+    # Redis
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_ttl: int = 3600
+
     # 服务配置
     host: str = "0.0.0.0"
     port: int = 8000
