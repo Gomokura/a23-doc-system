@@ -384,9 +384,41 @@ def _vector_search(query: str, query_embedding: list, file_ids: list) -> list:
     return vector_chunks
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# BM25 缓存配置（性能优化）
+# ═══════════════════════════════════════════════════════════════════════
+_BM25_CACHE_VALID = False  # 缓存是否有效
+_BM25_INDEX: Optional[BM25Okapi] = None
+_TOKENIZED_CORPUS: list = []  # 预分词语料库
+
+
+def _ensure_bm25_ready():
+    """
+    确保 BM25 索引已准备好（预分词+预构建，避免每次查询重建）
+    """
+    global _BM25_INDEX, _TOKENIZED_CORPUS, _BM25_CACHE_VALID, bm25_corpus, bm25_doc_map
+
+    if _BM25_CACHE_VALID and _BM25_INDEX is not None:
+        return
+
+    bm25_corpus, bm25_doc_map = get_bm25_data()
+
+    if bm25_corpus:
+        _TOKENIZED_CORPUS = [tokenize_chinese(doc, remove_stopwords=True) for doc in bm25_corpus]
+        _BM25_INDEX = BM25Okapi(_TOKENIZED_CORPUS)
+        _BM25_CACHE_VALID = True
+        logger.info(f"BM25 索引预构建完成: {len(bm25_corpus)} 条文档")
+
+
+# 全局变量用于缓存
+bm25_corpus: list = []
+bm25_doc_map: dict = {}
+
+
 def _bm25_search(query: str) -> Tuple[dict, dict]:
     """
     BM25 检索（独立函数，供并行调用）
+    使用预缓存的 BM25 索引，避免每次查询重建
 
     Args:
         query: 原始查询
@@ -394,21 +426,16 @@ def _bm25_search(query: str) -> Tuple[dict, dict]:
     Returns:
         (bm25_scores_map, bm25_doc_map): BM25得分和文档映射
     """
-    bm25_corpus, bm25_doc_map = get_bm25_data()
+    _ensure_bm25_ready()
+
     bm25_scores_map = {}
 
-    if bm25_corpus:
-        # 使用 jieba 中文分词构建 BM25
-        tokenized_corpus = [tokenize_chinese(doc, remove_stopwords=True) for doc in bm25_corpus]
-        bm25 = BM25Okapi(tokenized_corpus)
-
-        # 查询分词
+    if bm25_corpus and _BM25_INDEX:
         tokenized_query = tokenize_chinese(query, remove_stopwords=True)
         logger.info(f"BM25 分词结果: query='{query}' -> {tokenized_query}")
 
-        raw_scores = bm25.get_scores(tokenized_query)
+        raw_scores = _BM25_INDEX.get_scores(tokenized_query)
 
-        # 映射到 chunk_id
         for idx, score in enumerate(raw_scores):
             if idx < len(bm25_corpus):
                 content = bm25_corpus[idx]
