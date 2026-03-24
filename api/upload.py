@@ -7,8 +7,10 @@ import os
 import hashlib
 import asyncio
 from datetime import datetime, timezone
+from typing import Literal, Optional
+
 from fastapi import APIRouter, UploadFile, File, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
  
 from config import settings
@@ -153,8 +155,40 @@ async def parse_file(body: ParseRequest, db: Session = Depends(get_db)):
  
  
 # ── GET /parse/status/{task_id} ───────────────────────────────
-@router.get("/parse/status/{task_id}", summary="查询解析任务状态")
-async def parse_status(task_id: str, db: Session = Depends(get_db)):
+class ParseStatusResponse(BaseModel):
+    """解析任务状态（轮询接口返回体）"""
+
+    task_id: str = Field(..., description="任务 ID")
+    file_id: str = Field(..., description="关联文件 ID")
+    status: Literal["pending", "processing", "done", "failed"] = Field(
+        ..., description="任务状态"
+    )
+    progress: int = Field(..., ge=0, le=100, description="进度 0~100")
+    updated_at: str = Field(..., description="最后更新时间 ISO8601")
+    chunk_count: Optional[int] = Field(
+        None, description="解析完成后的分块数量（仅 status=done 时有）"
+    )
+    error: Optional[str] = Field(
+        None, description="失败原因（仅 status=failed 时有）"
+    )
+
+    model_config = {"json_schema_extra": {"example": {
+        "task_id": "7cafc2c9-36be-4481-8064-2295fb450e96",
+        "file_id": "1a635ee3-f56a-46d4-905a-bf742287c5b1",
+        "status": "done",
+        "progress": 100,
+        "updated_at": "2026-03-24T16:22:56.029250+00:00",
+        "chunk_count": 3,
+    }}}
+
+
+@router.get(
+    "/parse/status/{task_id}",
+    summary="查询解析任务状态",
+    response_model=ParseStatusResponse,
+    response_model_exclude_none=True,
+)
+async def parse_status(task_id: str, db: Session = Depends(get_db)) -> ParseStatusResponse:
     """
     轮询解析任务状态，建议每2秒一次。
     返回字段:
@@ -181,7 +215,7 @@ async def parse_status(task_id: str, db: Session = Depends(get_db)):
     elif task.status == "failed":
         base["error"] = task.error_msg
  
-    return base
+    return ParseStatusResponse(**base)
  
  
 # ── 后台解析任务 ──────────────────────────────────────────────
