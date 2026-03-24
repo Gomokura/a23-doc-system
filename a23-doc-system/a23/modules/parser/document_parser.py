@@ -89,18 +89,18 @@ def _extract_entities_and_summary(chunks: List[Dict[str, Any]]) -> tuple[List[Di
 
 def parse_document(file_path: str, file_id: str) -> dict:
     """
-    解析文档，返回 ParsedDocument dict（严格遵守规范文档 4.1 Schema） [cite: 296-301]
+    解析文档，返回 ParsedDocument dict（严格遵守规范文档 4.1 Schema）
 
     Args:
-        file_path: 文件本地路径（uploads/ 目录下） [cite: 298]
-        file_id:   文件唯一ID（由上传接口生成） [cite: 298]
+        file_path: 文件本地路径（uploads/ 目录下）
+        file_id:   文件唯一ID（由上传接口生成）
 
     Returns:
-        ParsedDocument dict [cite: 299]
+        ParsedDocument dict
 
     Raises:
-        ValueError:   不支持的文件格式 [cite: 300]
-        RuntimeError: 解析失败（文件损坏/加密等） [cite: 300]
+        ValueError:   不支持的文件格式
+        RuntimeError: 解析失败（文件损坏/加密等）
     """
     logger.info(f"开始解析文件: {file_path}, file_id: {file_id}")
 
