@@ -3,9 +3,10 @@
 函数签名已锁定，不得更改
 """
 import os
-from openpyxl import load_workbook
+
 from docx import Document
 from loguru import logger
+from openpyxl import load_workbook
 
 
 def fill_docx(template_path: str, answers: list, output_path: str) -> bool:
@@ -19,12 +20,12 @@ def fill_docx(template_path: str, answers: list, output_path: str) -> bool:
     try:
         doc = Document(template_path)
         # 构建字段名-值的映射表
-        field_map = {a['field_name']: a['value'] for a in answers}
+        field_map = {a["field_name"]: a["value"] for a in answers}
 
         # 遍历文档段落替换占位符
         for para in doc.paragraphs:
             for key, val in field_map.items():
-                placeholder = f'{{{{{key}}}}}'
+                placeholder = f"{{{{{key}}}}}"
                 if placeholder in para.text:
                     for run in para.runs:
                         run.text = run.text.replace(placeholder, val)
@@ -34,7 +35,7 @@ def fill_docx(template_path: str, answers: list, output_path: str) -> bool:
             for row in table.rows:
                 for cell in row.cells:
                     for key, val in field_map.items():
-                        placeholder = f'{{{{{key}}}}}'
+                        placeholder = f"{{{{{key}}}}}"
                         if placeholder in cell.text:
                             # 替换单元格文本，保留原有格式
                             cell_text = cell.text.replace(placeholder, val)
@@ -59,7 +60,7 @@ def fill_xlsx(template_path: str, answers: list, output_path: str) -> bool:
     try:
         wb = load_workbook(template_path)
         # 构建字段名-值的映射表
-        field_map = {a['field_name']: a['value'] for a in answers}
+        field_map = {a["field_name"]: a["value"] for a in answers}
 
         # 遍历所有工作表、行、单元格替换占位符
         for sheet in wb.worksheets:
@@ -67,7 +68,7 @@ def fill_xlsx(template_path: str, answers: list, output_path: str) -> bool:
                 for cell in row:
                     if cell.value and isinstance(cell.value, str):
                         for key, val in field_map.items():
-                            placeholder = f'{{{{{key}}}}}'
+                            placeholder = f"{{{{{key}}}}}"
                             if placeholder in cell.value:
                                 cell.value = cell.value.replace(placeholder, val)
 
@@ -124,6 +125,5 @@ def fill_table(template_path: str, fill_request: dict, output_path: str) -> bool
     if fill_success:
         logger.info(f"填表完成: output={output_path}")
         return True
-    else:
-        logger.error(f"填表失败: template={template_path}")
-        return False
+    logger.error(f"填表失败: template={template_path}")
+    return False
