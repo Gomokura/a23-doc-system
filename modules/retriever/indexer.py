@@ -4,7 +4,7 @@
 """
 import os
 import pickle
-from typing import Optional, List, Set
+from typing import Optional, List, Set, Dict
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
@@ -16,8 +16,14 @@ from config import settings
 # 全局变量（模块级缓存）
 _embed_model: Optional[SentenceTransformer] = None
 _chroma_client: Optional[chromadb.PersistentClient] = None
+
+# 兼容旧逻辑保留
 _bm25_corpus: list = []
 _bm25_doc_map: dict = {}
+
+# 新增：BM25 有序记录，保证 idx <-> chunk_id 一一对应
+_bm25_records: List[Dict] = []
+
 _indexed_files: Set[str] = set()  # 已索引的文件ID集合
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -47,22 +53,75 @@ def _get_chroma_client() -> chromadb.PersistentClient:
     return _chroma_client
 
 
+def _rebuild_bm25_views():
+    """根据 _bm25_records 重建兼容视图"""
+    global _bm25_corpus, _bm25_doc_map
+    _bm25_corpus = [r["content"] for r in _bm25_records]
+    _bm25_doc_map = {
+        r["chunk_id"]: {
+            "content": r["content"],
+            "file_id": r["file_id"],
+            "source_file": r["source_file"],
+            "page": r["page"],
+        }
+        for r in _bm25_records
+    }
+
+
+def _invalidate_retriever_runtime():
+    """索引变化后，让 retriever 的 BM25 运行时缓存失效，并清理问答缓存"""
+    try:
+        from modules.retriever.hybrid_retriever import invalidate_bm25_runtime_cache
+        invalidate_bm25_runtime_cache()
+    except Exception as e:
+        logger.warning(f"BM25 运行时缓存失效失败: {e}")
+
+    try:
+        from modules.cache.redis_client import invalidate_cache
+        invalidate_cache("*")
+    except Exception as e:
+        logger.warning(f"问答缓存清理失败: {e}")
+
+
 def _load_bm25_index() -> bool:
     """从磁盘加载 BM25 索引和已索引文件列表"""
-    global _bm25_corpus, _bm25_doc_map, _indexed_files
+    global _bm25_corpus, _bm25_doc_map, _bm25_records, _indexed_files
+
     bm25_path = os.path.join(settings.chroma_path, "bm25_index.pkl")
-    if os.path.exists(bm25_path):
-        try:
-            with open(bm25_path, "rb") as f:
-                data = pickle.load(f)
-                _bm25_corpus = data.get("corpus", [])
-                _bm25_doc_map = data.get("doc_map", {})
-                _indexed_files = set(data.get("indexed_files", []))
-            logger.info(f"加载 BM25 索引: {len(_bm25_corpus)} 条文档, 已索引文件: {len(_indexed_files)} 个")
-            return True
-        except Exception as e:
-            logger.warning(f"加载 BM25 索引失败: {e}，将重新构建")
-    return False
+    if not os.path.exists(bm25_path):
+        return False
+
+    try:
+        with open(bm25_path, "rb") as f:
+            data = pickle.load(f)
+
+        _indexed_files = set(data.get("indexed_files", []))
+
+        # 新格式优先
+        if "records" in data:
+            _bm25_records = data.get("records", [])
+            _rebuild_bm25_views()
+        else:
+            # 兼容旧格式：corpus + doc_map
+            _bm25_corpus = data.get("corpus", [])
+            _bm25_doc_map = data.get("doc_map", {})
+            _bm25_records = []
+            for chunk_id, info in _bm25_doc_map.items():
+                _bm25_records.append({
+                    "chunk_id": chunk_id,
+                    "content": info.get("content", ""),
+                    "file_id": info.get("file_id", ""),
+                    "source_file": info.get("source_file", ""),
+                    "page": info.get("page", 0),
+                })
+            _rebuild_bm25_views()
+
+        logger.info(f"加载 BM25 索引: {len(_bm25_records)} 条记录, 已索引文件: {len(_indexed_files)} 个")
+        return True
+
+    except Exception as e:
+        logger.warning(f"加载 BM25 索引失败: {e}，将重新构建")
+        return False
 
 
 def _save_bm25_index() -> bool:
@@ -71,9 +130,8 @@ def _save_bm25_index() -> bool:
     try:
         with open(bm25_path, "wb") as f:
             pickle.dump({
-                "corpus": _bm25_corpus,
-                "doc_map": _bm25_doc_map,
-                "indexed_files": list(_indexed_files)  # 记录已索引文件
+                "records": _bm25_records,
+                "indexed_files": list(_indexed_files),
             }, f)
         logger.info(f"BM25 索引已持久化: {bm25_path}")
         return True
@@ -103,9 +161,6 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
         logger.warning(f"文档 {file_id} 没有 chunks，跳过索引构建")
         return False
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # 增量索引：检查文件是否已索引
-    # ═══════════════════════════════════════════════════════════════════════
     if not force_rebuild:
         _load_bm25_index()
         if file_id in _indexed_files:
@@ -113,32 +168,24 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
             return True
 
     try:
-        # 初始化模型和客户端
         model = _get_embed_model()
         client = _get_chroma_client()
 
-        # 获取或创建集合（支持配置距离度量）
         collection = client.get_or_create_collection(
             name="documents",
             metadata={
                 "description": "A23 文档检索集合",
-                "distance_metric": settings.chroma_distance_metric,  # cosine | l2 | ip
+                "distance_metric": settings.chroma_distance_metric,
             }
         )
 
-        # 准备批量数据
         ids = []
         embeddings = []
         documents = []
         metadatas = []
 
-        # 加载已有 BM25 数据
         _load_bm25_index()
 
-        # ═══════════════════════════════════════════════════════════════
-        # 批量向量编码优化：一次性对所有文本进行编码，减少模型调用次数
-        # ═══════════════════════════════════════════════════════════════
-        # 先收集所有 chunk 的内容和元数据
         chunk_data_list = []
         for chunk in chunks:
             content = chunk.get("content", "")
@@ -155,11 +202,9 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
             logger.warning(f"文档 {file_id} 没有有效 chunks，跳过索引构建")
             return False
 
-        # 批量编码所有文本
         all_contents = [c["content"] for c in chunk_data_list]
         logger.info(f"开始批量编码 {len(all_contents)} 条文本，batch_size={BATCH_SIZE}")
 
-        # 分批编码，防止内存溢出
         all_embeddings = []
         for i in range(0, len(all_contents), BATCH_SIZE):
             batch = all_contents[i:i + BATCH_SIZE]
@@ -169,7 +214,6 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
 
         logger.info(f"批量编码完成: {len(all_embeddings)} 条")
 
-        # 组装最终数据
         for idx, chunk_data in enumerate(chunk_data_list):
             ids.append(chunk_data["chunk_id"])
             embeddings.append(all_embeddings[idx])
@@ -181,16 +225,14 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
                 "chunk_type": "text"
             })
 
-            # 同步更新 BM25 索引数据
-            _bm25_corpus.append(chunk_data["content"])
-            _bm25_doc_map[chunk_data["chunk_id"]] = {
+            _bm25_records.append({
+                "chunk_id": chunk_data["chunk_id"],
                 "content": chunk_data["content"],
                 "file_id": file_id,
                 "source_file": filename,
-                "page": chunk_data["page"]
-            }
+                "page": chunk_data["page"],
+            })
 
-        # 批量写入 ChromaDB
         if ids:
             collection.add(
                 ids=ids,
@@ -200,11 +242,12 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
             )
             logger.info(f"ChromaDB 写入完成: {len(ids)} 条")
 
-        # 记录已索引文件
         _indexed_files.add(file_id)
 
-        # 持久化 BM25 索引
+        _rebuild_bm25_views()
         _save_bm25_index()
+        _invalidate_retriever_runtime()
+
         logger.info(f"索引构建成功: file_id={file_id}")
         return True
 
@@ -214,9 +257,18 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
 
 
 def get_bm25_data() -> tuple:
-    """获取 BM25 语料和文档映射，供 hybrid_retriever 使用"""
+    """兼容旧逻辑：返回 corpus 和 doc_map"""
     _load_bm25_index()
     return _bm25_corpus, _bm25_doc_map
+
+
+def get_bm25_records(file_ids: Optional[list] = None) -> List[Dict]:
+    """返回 BM25 有序记录，可按 file_id 过滤"""
+    _load_bm25_index()
+    if not file_ids:
+        return list(_bm25_records)
+    file_id_set = set(file_ids)
+    return [r for r in _bm25_records if r.get("file_id") in file_id_set]
 
 
 def get_collection():
@@ -236,26 +288,19 @@ def delete_index(file_id: str) -> bool:
         True 成功 / False 失败
     """
     try:
+        global _bm25_records, _indexed_files
+
         _load_bm25_index()
 
-        # 1. 从 ChromaDB 删除
         collection = get_collection()
         collection.delete(where={"file_id": file_id})
 
-        # 2. 从 BM25 索引中删除
-        new_corpus = []
-        new_doc_map = {}
-        for chunk_id, info in _bm25_doc_map.items():
-            if info.get("file_id") != file_id:
-                new_corpus.append(info["content"])
-                new_doc_map[chunk_id] = info
-
-        _bm25_corpus = new_corpus
-        _bm25_doc_map = new_doc_map
+        _bm25_records = [r for r in _bm25_records if r.get("file_id") != file_id]
         _indexed_files.discard(file_id)
 
-        # 3. 持久化
+        _rebuild_bm25_views()
         _save_bm25_index()
+        _invalidate_retriever_runtime()
 
         logger.info(f"删除索引成功: file_id={file_id}")
         return True
@@ -279,20 +324,21 @@ def clear_all_indexes() -> bool:
         True 成功 / False 失败
     """
     try:
-        # 1. 清空 ChromaDB
+        global _bm25_corpus, _bm25_doc_map, _bm25_records, _indexed_files
+
         collection = get_collection()
         collection.delete(where={})
 
-        # 2. 清空 BM25
-        global _bm25_corpus, _bm25_doc_map, _indexed_files
         _bm25_corpus = []
         _bm25_doc_map = {}
+        _bm25_records = []
         _indexed_files = set()
 
-        # 3. 删除持久化文件
         bm25_path = os.path.join(settings.chroma_path, "bm25_index.pkl")
         if os.path.exists(bm25_path):
             os.remove(bm25_path)
+
+        _invalidate_retriever_runtime()
 
         logger.info("已清空所有索引")
         return True

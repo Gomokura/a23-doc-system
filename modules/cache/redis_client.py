@@ -1,15 +1,18 @@
 import json
-from typing import Optional
-import redis
+
 from loguru import logger
+
 from config import settings
 
 _redis_client = None
+
 
 def _get_redis():
     global _redis_client
     if _redis_client is None:
         try:
+            import redis
+
             _redis_client = redis.Redis(
                 host=settings.redis_host,
                 port=settings.redis_port,
