@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from config import settings
 from db.database import get_db
 from db.models import FileRecord, TaskRecord
+from main import AppError
 
 router = APIRouter(tags=["文档上传与解析"])
 
@@ -20,7 +21,6 @@ router = APIRouter(tags=["文档上传与解析"])
 @router.post("/upload")
 async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """上传文件，返回 file_id"""
-    from main import AppError
 
     # 校验文件格式
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
@@ -59,7 +59,6 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
 @router.post("/parse")
 async def parse_file(body: dict, db: Session = Depends(get_db)):
     """提交解析任务（异步），立即返回 task_id，前端轮询 /parse/status/{task_id}"""
-    from main import AppError
 
     file_id = body.get("file_id")
     if not file_id:
@@ -94,7 +93,6 @@ async def parse_file(body: dict, db: Session = Depends(get_db)):
 @router.get("/parse/status/{task_id}")
 async def parse_status(task_id: str, db: Session = Depends(get_db)):
     """轮询解析任务状态，建议每2秒轮询一次"""
-    from main import AppError
     task = db.query(TaskRecord).filter_by(task_id=task_id).first()
     if not task:
         raise AppError(404, "TASK_NOT_FOUND", f"任务 {task_id} 不存在")

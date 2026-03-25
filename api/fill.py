@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from config import settings
 from db.database import get_db
 from db.models import FileRecord, OutputRecord
-from main import AppError
+from errors import AppError
 
 router = APIRouter(tags=["表格回填"])
 

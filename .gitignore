@@ -29,6 +29,8 @@ env/
 # 系统文件
 .DS_Store
 Thumbs.db
+*.exe
+python-3.11.9.exe
 
 # 依赖安装目录
 *.egg-info/
