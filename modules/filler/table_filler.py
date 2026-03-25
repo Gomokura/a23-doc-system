@@ -2,11 +2,37 @@
 表格回填模块 - 负责人: 成员4
 函数签名已锁定，不得更改
 """
+import re
 import os
+import shutil as _shutil
 
-from docx import Document
 from loguru import logger
+from docx import Document
 from openpyxl import load_workbook
+
+
+def _replace_placeholder_in_paragraph(para, field_map: dict) -> None:
+    """
+    替换段落中的占位符，处理占位符被拆分到多个 run 的情况。
+    思路参考 SpreadsheetLLM CoS：先重建完整文本定位占位符，再按原 run 边界写回。
+    """
+    full_text = "".join(run.text for run in para.runs)
+    new_text = full_text
+    for key, val in field_map.items():
+        new_text = new_text.replace(f"{{{{{key}}}}}", str(val))
+
+    if new_text == full_text:
+        return  # 无占位符，跳过
+
+    # 将新文本按原 run 长度分配写回，保留各 run 的格式
+    idx = 0
+    for run in para.runs:
+        run_len = len(run.text)
+        run.text = new_text[idx: idx + run_len]
+        idx += run_len
+    # 若新文本比原文本长/短，剩余内容追加到最后一个 run
+    if idx < len(new_text) and para.runs:
+        para.runs[-1].text += new_text[idx:]
 
 
 def fill_docx(template_path: str, answers: list, output_path: str) -> bool:
@@ -19,27 +45,18 @@ def fill_docx(template_path: str, answers: list, output_path: str) -> bool:
     """
     try:
         doc = Document(template_path)
-        # 构建字段名-值的映射表
-        field_map = {a["field_name"]: a["value"] for a in answers}
+        field_map = {a['field_name']: a['value'] for a in answers}
 
-        # 遍历文档段落替换占位符
+        # 遍历顶层段落
         for para in doc.paragraphs:
-            for key, val in field_map.items():
-                placeholder = f"{{{{{key}}}}}"
-                if placeholder in para.text:
-                    for run in para.runs:
-                        run.text = run.text.replace(placeholder, val)
+            _replace_placeholder_in_paragraph(para, field_map)
 
-        # 遍历文档表格替换占位符
+        # 遍历文档表格（含表格内各段落，支持合并单元格）
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
-                    for key, val in field_map.items():
-                        placeholder = f"{{{{{key}}}}}"
-                        if placeholder in cell.text:
-                            # 替换单元格文本，保留原有格式
-                            cell_text = cell.text.replace(placeholder, val)
-                            cell.paragraphs[0].runs[0].text = cell_text
+                    for para in cell.paragraphs:
+                        _replace_placeholder_in_paragraph(para, field_map)
 
         doc.save(output_path)
         logger.info(f"DOCX模板填充完成，输出文件：{output_path}")
@@ -59,18 +76,24 @@ def fill_xlsx(template_path: str, answers: list, output_path: str) -> bool:
     """
     try:
         wb = load_workbook(template_path)
-        # 构建字段名-值的映射表
-        field_map = {a["field_name"]: a["value"] for a in answers}
+        field_map = {a['field_name']: a['value'] for a in answers}
 
-        # 遍历所有工作表、行、单元格替换占位符
         for sheet in wb.worksheets:
+            # iter_rows 不含合并单元格的从属格，需单独处理合并区域
+            merged_cells = {str(cell) for rng in sheet.merged_cells.ranges for cell in rng.cells}
+
             for row in sheet.iter_rows():
                 for cell in row:
+                    # 跳过合并单元格的从属格（只写主格，避免 openpyxl 抛异常）
+                    if cell.coordinate in merged_cells and \
+                            cell.row != cell.row and cell.column != cell.column:
+                        continue
                     if cell.value and isinstance(cell.value, str):
+                        new_val = cell.value
                         for key, val in field_map.items():
-                            placeholder = f"{{{{{key}}}}}"
-                            if placeholder in cell.value:
-                                cell.value = cell.value.replace(placeholder, val)
+                            new_val = new_val.replace(f"{{{{{key}}}}}", str(val))
+                        if new_val != cell.value:
+                            cell.value = new_val
 
         wb.save(output_path)
         logger.info(f"XLSX模板填充完成，输出文件：{output_path}")
@@ -80,7 +103,7 @@ def fill_xlsx(template_path: str, answers: list, output_path: str) -> bool:
         return False
 
 
-def fill_table(template_path: str, fill_request: dict, output_path: str) -> bool:
+def fill_table(template_path: str, fill_request: dict, output_path: str, shutil=None) -> bool:
     """
     根据 FillRequest 将字段填入模板文件
 
@@ -102,7 +125,7 @@ def fill_table(template_path: str, fill_request: dict, output_path: str) -> bool
     if not os.path.exists(template_path):
         logger.error(f"模板文件不存在：{template_path}")
         return False
-    if not fill_request or not isinstance(fill_request.get("answers"), list):
+    if not fill_request or not isinstance(fill_request.get('answers'), list):
         logger.error("FillRequest格式错误，answers必须为非空列表")
         return False
     if not output_path:
@@ -110,20 +133,28 @@ def fill_table(template_path: str, fill_request: dict, output_path: str) -> bool
         return False
 
     # 2. 提取回填数据
-    answers = fill_request["answers"]
+    answers = fill_request['answers']
 
-    # 3. 按文件类型执行填充逻辑
-    file_suffix = template_path.rsplit(".", 1)[-1].lower()
-    if file_suffix == "docx":
+    # 3. 获取文件后缀，判断模板类型
+    file_suffix = os.path.splitext(template_path)[-1].lstrip('.').lower()
+
+    # 4. 按文件类型执行填充逻辑
+    if file_suffix == 'docx':
         fill_success = fill_docx(template_path, answers, output_path)
-    elif file_suffix == "xlsx":
+    elif file_suffix == 'xlsx':
         fill_success = fill_xlsx(template_path, answers, output_path)
     else:
-        logger.error(f"不支持的文件格式：{file_suffix}，仅支持 docx / xlsx")
-        return False
+        logger.warning(f"不支持的文件格式：{file_suffix}，复制原文件到输出路径")
+        try:
+            _shutil.copy(template_path, output_path)
+            fill_success = True
+        except Exception as e:
+            logger.error(f"复制文件失败: {e}")
+            fill_success = False
 
+    # 5. 返回最终结果
     if fill_success:
         logger.info(f"填表完成: output={output_path}")
-        return True
-    logger.error(f"填表失败: template={template_path}")
-    return False
+    else:
+        logger.error(f"填表失败: template={template_path}")
+    return fill_success
