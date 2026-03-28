@@ -12,7 +12,7 @@ import jieba
 import numpy as np
 from loguru import logger
 from openai import OpenAI
-from rank_bm25 import BM25Okapi
+import bm25s
 from sentence_transformers import CrossEncoder
 
 from config import settings
@@ -25,7 +25,6 @@ from modules.retriever.indexer import (
 # ═══════════════════════════════════════════════════════════════════════
 # ReRanker 配置
 # ═══════════════════════════════════════════════════════════════════════
-RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 RERANKER_TOP_K = 5
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -70,24 +69,23 @@ def _normalize_scores(scores: list) -> list:
 # ═══════════════════════════════════════════════════════════════════════
 # 自适应权重配置
 # ═══════════════════════════════════════════════════════════════════════
-QUERY_TOKEN_THRESHOLD = 5
-WEIGHT_VECTOR_SHORT = 0.4
-WEIGHT_BM25_SHORT = 0.6
-WEIGHT_VECTOR_LONG = 0.7
-WEIGHT_BM25_LONG = 0.3
-
-
 def get_adaptive_weights(query: str) -> Tuple[float, float]:
     tokens = tokenize_chinese(query, remove_stopwords=False)
     token_count = len(tokens)
 
-    if token_count > QUERY_TOKEN_THRESHOLD:
-        weight_vector = WEIGHT_VECTOR_LONG
-        weight_bm25 = WEIGHT_BM25_LONG
+    threshold = getattr(settings, "query_token_threshold", 5)
+    wv_short = getattr(settings, "weight_vector_short", 0.4)
+    wb_short = getattr(settings, "weight_bm25_short", 0.6)
+    wv_long = getattr(settings, "weight_vector_long", 0.7)
+    wb_long = getattr(settings, "weight_bm25_long", 0.3)
+
+    if token_count > threshold:
+        weight_vector = wv_long
+        weight_bm25 = wb_long
         logger.info(f"自适应权重 [长查询 {token_count} 词]: vector={weight_vector}, bm25={weight_bm25}")
     else:
-        weight_vector = WEIGHT_VECTOR_SHORT
-        weight_bm25 = WEIGHT_BM25_SHORT
+        weight_vector = wv_short
+        weight_bm25 = wb_short
         logger.info(f"自适应权重 [短查询 {token_count} 词]: vector={weight_vector}, bm25={weight_bm25}")
 
     return weight_vector, weight_bm25
@@ -102,7 +100,7 @@ _reranker_model: Optional[CrossEncoder] = None
 def _get_reranker() -> CrossEncoder:
     global _reranker_model
     if _reranker_model is None:
-        model_name = getattr(settings, "reranker_model", None) or RERANKER_MODEL
+        model_name = getattr(settings, "reranker_model", None) or "Qwen/Qwen3-Reranker-0.6B"
         logger.info(f"加载 ReRanker 模型: {model_name}")
         _reranker_model = CrossEncoder(model_name)
     return _reranker_model
@@ -230,6 +228,82 @@ def fuse_results(top_chunks: list, conflicts: list) -> tuple:
     return top_chunks, fusion_info
 
 
+def mmr_diversity_rerank(query: str, chunks: list, lambda_val: float = None) -> list:
+    """
+    MMR (Maximal Marginal Relevance) Diversity 重排序。
+    位于 CrossEncoder 重排序之后，在相关性和多样性之间取平衡。
+
+    公式: MMR = λ·Sim(query, doc) − (1−λ)·max_Sim(doc, already_selected)
+    论文: Carbonell & Goldstein, SIGIR 1998
+
+    Args:
+        query: 用户查询
+        chunks: 已按 rerank_score 降序排列的 chunk 列表
+        lambda_val: 平衡系数，1=只看相关性，0=只看多样性，默认从配置读取
+    Returns:
+        经 MMR 筛选后的 chunk 列表（顺序已更新）
+    """
+    if not chunks or len(chunks) <= 2:
+        return chunks
+
+    lambda_val = lambda_val or getattr(settings, "mmr_lambda", 0.7)
+    if not getattr(settings, "mmr_enabled", False):
+        return chunks
+
+    try:
+        embed_model = _get_embed_model()
+        contents = [c.get("content", "") for c in chunks]
+        chunk_embeds = embed_model.encode(contents, normalize_embeddings=True)
+
+        relevance_scores = np.array([c.get("rerank_score", 0.0) for c in chunks])
+        if relevance_scores.max() != relevance_scores.min():
+            relevance_scores = (relevance_scores - relevance_scores.min()) / (
+                relevance_scores.max() - relevance_scores.min()
+            )
+        else:
+            relevance_scores = np.ones_like(relevance_scores) * 0.5
+
+        selected: list = []
+        remaining = list(range(len(chunks)))
+
+        while remaining and len(selected) < len(chunks):
+            best_score = -float("inf")
+            best_idx = None
+
+            for idx in remaining:
+                sim_to_query = float(relevance_scores[idx])
+
+                max_sim_to_selected = 0.0
+                if selected:
+                    selected_embeds = chunk_embeds[selected]
+                    similarities = np.dot(chunk_embeds[idx], selected_embeds.T)
+                    max_sim_to_selected = float(np.max(similarities))
+
+                mmr_score = (
+                    lambda_val * sim_to_query
+                    - (1 - lambda_val) * max_sim_to_selected
+                )
+
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_idx = idx
+
+            if best_idx is not None:
+                selected.append(best_idx)
+                remaining.remove(best_idx)
+
+        result = [chunks[i] for i in selected]
+        logger.info(
+            f"MMR Diversity 完成 (λ={lambda_val:.2f}): "
+            f"{len(chunks)} → {len(result)} 条，移除了 {len(chunks)-len(result)} 个冗余 chunk"
+        )
+        return result
+
+    except Exception as e:
+        logger.warning(f"MMR Diversity 失败: {e}，返回原始排序")
+        return chunks
+
+
 def distance_to_score(distance: float, method: str = "exp") -> float:
     if distance is None or distance < 0:
         return 0.0
@@ -274,27 +348,28 @@ def _vector_search(query: str, query_embedding: list, file_ids: list) -> list:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# BM25 运行时缓存
+# BM25S 运行时缓存
 # ═══════════════════════════════════════════════════════════════════════
 _BM25_CACHE_VALID = False
-_BM25_INDEX: Optional[BM25Okapi] = None
+_BM25_INDEX: Optional[bm25s.BM25] = None
 _BM25_CACHE_KEY = None
 _BM25_RECORDS: list = []
-_TOKENIZED_CORPUS: list = []
+_BM25_CORPUS: list = []  # BM25S 需要原始文本供 retrieve() 使用
+_BM25S_INDEX_PATH = "./db/bm25s_index"
 
 
 def invalidate_bm25_runtime_cache():
-    global _BM25_CACHE_VALID, _BM25_INDEX, _BM25_CACHE_KEY, _BM25_RECORDS, _TOKENIZED_CORPUS
+    global _BM25_CACHE_VALID, _BM25_INDEX, _BM25_CACHE_KEY, _BM25_RECORDS, _BM25_CORPUS
     _BM25_CACHE_VALID = False
     _BM25_INDEX = None
     _BM25_CACHE_KEY = None
     _BM25_RECORDS = []
-    _TOKENIZED_CORPUS = []
-    logger.info("BM25 运行时缓存已失效")
+    _BM25_CORPUS = []
+    logger.info("BM25S 运行时缓存已失效")
 
 
 def _ensure_bm25_ready(file_ids: list = None):
-    global _BM25_INDEX, _TOKENIZED_CORPUS, _BM25_CACHE_VALID, _BM25_CACHE_KEY, _BM25_RECORDS
+    global _BM25_INDEX, _BM25_CORPUS, _BM25_CACHE_VALID, _BM25_CACHE_KEY, _BM25_RECORDS
 
     cache_key = tuple(sorted(file_ids)) if file_ids else "__all__"
 
@@ -306,23 +381,51 @@ def _ensure_bm25_ready(file_ids: list = None):
 
     if not records:
         _BM25_INDEX = None
-        _TOKENIZED_CORPUS = []
+        _BM25_CORPUS = []
         _BM25_CACHE_VALID = True
         _BM25_CACHE_KEY = cache_key
         return
 
     corpus = [r["content"] for r in records]
-    _TOKENIZED_CORPUS = [tokenize_chinese(doc, remove_stopwords=True) for doc in corpus]
-    _BM25_INDEX = BM25Okapi(_TOKENIZED_CORPUS)
+    _BM25_CORPUS = corpus
+
+    # 尝试从持久化文件加载
+    method = getattr(settings, "bm25s_method", "robertson")
+    index_file = f"{_BM25S_INDEX_PATH}_{cache_key}.pt"
+    corpus_file = f"{_BM25S_INDEX_PATH}_{cache_key}_corpus.json"
+
+    import os
+    if os.path.exists(index_file) and os.path.exists(corpus_file):
+        try:
+            _BM25_INDEX = bm25s.BM25.load(index_file, load_corpus=True)
+            _BM25_CACHE_VALID = True
+            _BM25_CACHE_KEY = cache_key
+            logger.info(f"BM25S 从持久化加载: {len(records)} 条")
+            return
+        except Exception as e:
+            logger.warning(f"BM25S 持久化加载失败，重新构建: {e}")
+
+    # 构建索引
+    corpus_tokens = bm25s.tokenize(corpus, stopwords=None)
+    _BM25_INDEX = bm25s.BM25(method=method)
+    _BM25_INDEX.index(corpus_tokens)
+
+    # 持久化保存
+    try:
+        os.makedirs(os.path.dirname(index_file), exist_ok=True)
+        _BM25_INDEX.save(index_file)
+        logger.info(f"BM25S 持久化已保存: {index_file}")
+    except Exception as e:
+        logger.warning(f"BM25S 持久化失败: {e}")
+
     _BM25_CACHE_VALID = True
     _BM25_CACHE_KEY = cache_key
-
-    logger.info(f"BM25 索引预构建完成: {len(records)} 条文档, file_filter={cache_key}")
+    logger.info(f"BM25S 索引构建完成: {len(records)} 条, method={method}")
 
 
 def _bm25_search(query: str, file_ids: list = None) -> Tuple[dict, dict]:
     """
-    BM25 检索（独立函数，供并行调用）
+    BM25S 检索（独立函数，供并行调用）
     支持 file_ids 过滤，并直接返回 chunk_id -> score 映射
     """
     _ensure_bm25_ready(file_ids)
@@ -333,23 +436,64 @@ def _bm25_search(query: str, file_ids: list = None) -> Tuple[dict, dict]:
     if not _BM25_RECORDS or _BM25_INDEX is None:
         return bm25_scores_map, bm25_doc_map
 
-    tokenized_query = tokenize_chinese(query, remove_stopwords=True)
-    logger.info(f"BM25 分词结果: query='{query}' -> {tokenized_query}")
+    # BM25S 内置分词，同时支持中文 jieba
+    query_tokens = list(jieba.cut(query))
+    query_tokens = [t.strip() for t in query_tokens if t.strip()]
+    logger.info(f"BM25S 分词结果: query='{query}' -> {query_tokens}")
 
-    raw_scores = _BM25_INDEX.get_scores(tokenized_query)
+    # retrieve 返回 (top_doc_ids, top_scores)，k=None 取全部
+    # BM25S.load(load_corpus=True) 会把 corpus 存入对象内部，corpus=None 则自动用内部的
+    top_doc_ids, top_scores = _BM25_INDEX.retrieve(
+        [query_tokens],
+        corpus=None,
+        k=len(_BM25_CORPUS),
+        return_as="extension",
+    )
 
-    for record, score in zip(_BM25_RECORDS, raw_scores):
-        chunk_id = record["chunk_id"]
-        bm25_scores_map[chunk_id] = float(score)
-        bm25_doc_map[chunk_id] = {
-            "content": record["content"],
-            "file_id": record["file_id"],
-            "source_file": record["source_file"],
-            "page": record["page"],
-        }
+    doc_ids = top_doc_ids[0] if len(top_doc_ids) else []
+    scores = top_scores[0] if len(top_scores) else []
 
-    logger.info(f"BM25 检索完成: {len(bm25_scores_map)} 条得分")
+    for idx, score in zip(doc_ids, scores):
+        idx_int = int(idx)
+        if idx_int < len(_BM25_RECORDS):
+            record = _BM25_RECORDS[idx_int]
+            chunk_id = record["chunk_id"]
+            bm25_scores_map[chunk_id] = float(score)
+            bm25_doc_map[chunk_id] = {
+                "content": record["content"],
+                "file_id": record["file_id"],
+                "source_file": record["source_file"],
+                "page": record["page"],
+            }
+
+    logger.info(f"BM25S 检索完成: {len(bm25_scores_map)} 条得分")
     return bm25_scores_map, bm25_doc_map
+
+
+def reciprocal_rank_fusion(results_list: list, k: int = 60) -> dict:
+    """
+    Reciprocal Rank Fusion (RRF) — Google 提出的无参检索融合方法。
+    不依赖得分绝对值，只依赖排名顺序，对各路检索结果一视同仁。
+    公式: RRF(d) = Σ 1/(k + rank(d))
+
+    Args:
+        results_list: 各路检索的已排序结果列表（每个元素是 dict，需有 chunk_id）
+        k: RRF 超参数，默认 60。值越大，各路结果的权重越趋于均等。
+    Returns:
+        chunk_id -> rrf_score 的映射，按分降序排列
+    """
+    scores: dict = {}
+
+    for results in results_list:
+        if not results:
+            continue
+        for rank, item in enumerate(results):
+            chunk_id = item.get("chunk_id")
+            if chunk_id:
+                scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)
+
+    sorted_chunk_ids = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return dict(sorted_chunk_ids)
 
 
 def _hybrid_retrieve(query: str, file_ids: list) -> list:
@@ -370,7 +514,6 @@ def _hybrid_retrieve(query: str, file_ids: list) -> list:
         vector_chunks = vector_future.result()
         bm25_scores_map, bm25_doc_map = bm25_future.result()
 
-    weight_vector, weight_bm25 = get_adaptive_weights(query)
     candidate_map = {}
 
     for vc in vector_chunks:
@@ -409,21 +552,47 @@ def _hybrid_retrieve(query: str, file_ids: list) -> list:
     if not candidates:
         return []
 
-    vector_scores = [c["vector_score"] for c in candidates]
-    bm25_scores = [c["bm25_score"] for c in candidates]
+    fusion_method = getattr(settings, "fusion_method", "rrf")
 
-    vector_norm = _normalize_scores(vector_scores)
-    bm25_norm = _normalize_scores(bm25_scores)
+    if fusion_method == "rrf":
+        rrf_k = getattr(settings, "rrf_k", 60)
 
-    for i, c in enumerate(candidates):
-        c["vector_score_norm"] = vector_norm[i]
-        c["bm25_score_norm"] = bm25_norm[i]
-        c["hybrid_score"] = (
-            c["vector_score_norm"] * weight_vector +
-            c["bm25_score_norm"] * weight_bm25
+        vector_ranked = sorted(
+            [c for c in candidates if c.get("vector_score", 0) > 0 or c.get("distance") is not None],
+            key=lambda x: x.get("vector_score", 0),
+            reverse=True
+        )
+        bm25_ranked = sorted(
+            [c for c in candidates if c.get("bm25_score", 0) > 0],
+            key=lambda x: x.get("bm25_score", 0),
+            reverse=True
         )
 
-    candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)
+        rrf_scores = reciprocal_rank_fusion([vector_ranked, bm25_ranked], k=rrf_k)
+
+        for c in candidates:
+            c["hybrid_score"] = float(rrf_scores.get(c["chunk_id"], 0.0))
+
+        candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)
+        logger.info(f"RRF 融合完成 (k={rrf_k}), vector_rank={len(vector_ranked)}, bm25_rank={len(bm25_ranked)}")
+    else:
+        weight_vector, weight_bm25 = get_adaptive_weights(query)
+
+        vector_scores = [c["vector_score"] for c in candidates]
+        bm25_scores = [c["bm25_score"] for c in candidates]
+
+        vector_norm = _normalize_scores(vector_scores)
+        bm25_norm = _normalize_scores(bm25_scores)
+
+        for i, c in enumerate(candidates):
+            c["vector_score_norm"] = vector_norm[i]
+            c["bm25_score_norm"] = bm25_norm[i]
+            c["hybrid_score"] = (
+                c["vector_score_norm"] * weight_vector +
+                c["bm25_score_norm"] * weight_bm25
+            )
+
+        candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)
 
     # 去重：优先按 chunk_id；若 chunk_id 不同但 content 一样，也只保留分高的
     deduped = []
@@ -438,6 +607,7 @@ def _hybrid_retrieve(query: str, file_ids: list) -> list:
 
     top_chunks = deduped[: settings.top_k * 2]
     top_chunks = rerank_chunks(query, top_chunks, top_k=settings.top_k)
+    top_chunks = mmr_diversity_rerank(query, top_chunks)
 
     logger.info(
         f"混合检索完成: vector={len(vector_chunks)}, bm25={len(bm25_scores_map)}, "

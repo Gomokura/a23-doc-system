@@ -26,6 +26,14 @@ _bm25_records: List[Dict] = []
 
 _indexed_files: Set[str] = set()  # 已索引的文件ID集合
 
+# P3 新增：持久化分词结果，避免冷启动时重复分词
+_tokenized_corpus_pkl: List[list] = []  # 已持久化的分词语料
+
+
+def get_tokenized_corpus_pkl() -> List[list]:
+    """导出分词语料，供 hybrid_retriever 复用（避免重复分词）"""
+    return _tokenized_corpus_pkl
+
 # ═══════════════════════════════════════════════════════════════════════
 # 批量编码配置
 # ═══════════════════════════════════════════════════════════════════════
@@ -85,7 +93,7 @@ def _invalidate_retriever_runtime():
 
 def _load_bm25_index() -> bool:
     """从磁盘加载 BM25 索引和已索引文件列表"""
-    global _bm25_corpus, _bm25_doc_map, _bm25_records, _indexed_files
+    global _bm25_corpus, _bm25_doc_map, _bm25_records, _indexed_files, _tokenized_corpus_pkl
 
     bm25_path = os.path.join(settings.chroma_path, "bm25_index.pkl")
     if not os.path.exists(bm25_path):
@@ -96,6 +104,7 @@ def _load_bm25_index() -> bool:
             data = pickle.load(f)
 
         _indexed_files = set(data.get("indexed_files", []))
+        _tokenized_corpus_pkl = data.get("tokenized_corpus", [])
 
         # 新格式优先
         if "records" in data:
@@ -116,7 +125,11 @@ def _load_bm25_index() -> bool:
                 })
             _rebuild_bm25_views()
 
-        logger.info(f"加载 BM25 索引: {len(_bm25_records)} 条记录, 已索引文件: {len(_indexed_files)} 个")
+        logger.info(
+            f"加载 BM25 索引: {len(_bm25_records)} 条记录, "
+            f"已索引文件: {len(_indexed_files)} 个, "
+            f"已加载分词语料: {len(_tokenized_corpus_pkl)} 条"
+        )
         return True
 
     except Exception as e:
@@ -124,16 +137,17 @@ def _load_bm25_index() -> bool:
         return False
 
 
-def _save_bm25_index() -> bool:
-    """持久化 BM25 索引到磁盘"""
+def _save_bm25_index(tokenized_corpus: list = None) -> bool:
+    """持久化 BM25 索引到磁盘（包含分词结果以加速冷启动）"""
     bm25_path = os.path.join(settings.chroma_path, "bm25_index.pkl")
     try:
         with open(bm25_path, "wb") as f:
             pickle.dump({
                 "records": _bm25_records,
                 "indexed_files": list(_indexed_files),
+                "tokenized_corpus": tokenized_corpus if tokenized_corpus is not None else [],
             }, f)
-        logger.info(f"BM25 索引已持久化: {bm25_path}")
+        logger.info(f"BM25 索引已持久化: {bm25_path}, 分词语料 {len(tokenized_corpus) if tokenized_corpus else 0} 条")
         return True
     except Exception as e:
         logger.error(f"持久化 BM25 索引失败: {e}")
@@ -324,7 +338,7 @@ def clear_all_indexes() -> bool:
         True 成功 / False 失败
     """
     try:
-        global _bm25_corpus, _bm25_doc_map, _bm25_records, _indexed_files
+        global _bm25_corpus, _bm25_doc_map, _bm25_records, _indexed_files, _tokenized_corpus_pkl
 
         collection = get_collection()
         collection.delete(where={})
@@ -333,6 +347,7 @@ def clear_all_indexes() -> bool:
         _bm25_doc_map = {}
         _bm25_records = []
         _indexed_files = set()
+        _tokenized_corpus_pkl = []
 
         bm25_path = os.path.join(settings.chroma_path, "bm25_index.pkl")
         if os.path.exists(bm25_path):
