@@ -85,9 +85,13 @@ def fill_xlsx(template_path: str, answers: list, output_path: str) -> bool:
             for row in sheet.iter_rows():
                 for cell in row:
                     # 跳过合并单元格的从属格（只写主格，避免 openpyxl 抛异常）
-                    if cell.coordinate in merged_cells and \
-                            cell.row != cell.row and cell.column != cell.column:
-                        continue
+                    if cell.coordinate in merged_cells:
+                        is_master = any(
+                            cell.row == rng.min_row and cell.column == rng.min_col
+                            for rng in sheet.merged_cells.ranges
+                        )
+                        if not is_master:
+                            continue
                     if cell.value and isinstance(cell.value, str):
                         new_val = cell.value
                         for key, val in field_map.items():
