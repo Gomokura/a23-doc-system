@@ -2,7 +2,7 @@
 
 > **负责人**：成员3
 > **所属分支**：`feat/retriever`
-> **最后更新**：2026-03-19
+> **最后更新**：2026-03-28
 
 ---
 
@@ -20,7 +20,7 @@
 
 ```
 modules/retriever/
-├── indexer.py           # 索引构建：向量入库 + BM25 维护
+├── indexer.py           # 索引构建：向量入库 + BM25S 维护
 └── hybrid_retriever.py # 混合检索 + 冲突检测 + LLM 问答
 ```
 
@@ -35,7 +35,7 @@ modules/retriever/
 | 索引类型 | 工具 | 存储路径 |
 |----------|------|----------|
 | 向量索引 | ChromaDB + `BAAI/bge-small-zh-v1.5` | `db/chroma/` |
-| BM25 索引 | `rank_bm25.BM25Okapi` | `db/chroma/bm25_index.pkl` |
+| BM25 索引 | `bm25s.BM25`（持久化到 `./db/bm25s_index_*.pt`） |
 
 ### 2.2 向量索引流程
 
@@ -43,11 +43,11 @@ modules/retriever/
 2. 批量写入 ChromaDB 持久化集合 `documents`
 3. metadata 记录：`file_id`、`source_file`、`page`、`chunk_type`
 
-### 2.3 BM25 索引流程
+### 2.3 BM25S 索引流程
 
-1. 所有 chunk 内容存入 `_bm25_corpus`（列表）
-2. 同步维护 `_bm25_doc_map`（chunk_id → 元信息）
-3. 每次 `build_index` 调用后，持久化到 `bm25_index.pkl`
+1. 所有 chunk 内容存入 `_BM25_CORPUS`（列表）
+2. 同步维护 `_BM25_RECORDS`（chunk_id → 元信息）
+3. 使用 `bm25s.BM25` 构建索引，持久化到 `./db/bm25s_index_*.pt`
 4. 启动时自动从磁盘加载，无须重建
 
 ### 2.4 关键配置
@@ -56,6 +56,7 @@ modules/retriever/
 # config.py
 embed_model = "BAAI/bge-small-zh-v1.5"  # 中文嵌入模型
 chroma_path = "./db/chroma"              # 向量数据库路径
+bm25s_method = "robertson"              # BM25S 变体
 ```
 
 ---
@@ -71,11 +72,20 @@ chroma_path = "./db/chroma"              # 向量数据库路径
     │                    │
     │                    └── 余弦相似度（1 / (1 + distance)）
     │
-    └── BM25 检索 ─── rank_bm25 ───────── 权重 40%
+    └── BM25S 检索 ─── bm25s.BM25 ──────── 权重 40%
                          │
-                         └── TF-IDF 得分
-                             
-    两种得分各自归一化后加权求和，按最终得分排序取 TOP 5
+                         └── TF-IDF 得分（jieba 中文分词）
+
+    ↓
+RRF 倒数排名融合（k=60）
+    ↓
+内容去重（content 指纹）
+    ↓
+CrossEncoder 重排（Qwen/Qwen3-Reranker-0.6B，MTEB-R 65.80）
+    ↓
+MMR Diversity 去重（λ=0.7，语义去重，避免重复条款）
+    ↓
+TOP 5 → LLM(qwen3:8b)
 ```
 
 ### 3.2 混合得分公式
@@ -210,6 +220,10 @@ result = retrieve_and_answer(query=query, file_ids=file_ids)
 | `bm25_weight` | 0.4 | BM25 检索权重 |
 | `top_k` | 5 | 返回的最多 chunk 数 |
 | `embed_model` | `BAAI/bge-small-zh-v1.5` | 嵌入模型 |
+| `reranker_model` | `Qwen/Qwen3-Reranker-0.6B` | CrossEncoder 重排模型 |
+| `mmr_enabled` | True | 是否启用 MMR Diversity |
+| `mmr_lambda` | 0.7 | MMR 多样性系数（1=只看相关，0=只看多样） |
+| `bm25s_method` | robertson | BM25S 变体 |
 | `llm_model` | `qwen3:8b`（Ollama 本地） | LLM 模型，通过 Ollama 部署 |
 | `llm_base_url` | `http://localhost:11434/v1` | Ollama 服务地址 |
 
@@ -226,6 +240,7 @@ a23-doc-system/
 ├── docs/
 │   ├── retriever-module.md      ✅ 本文档
 │   └── 技术亮点与性能优化总结.md
+├── CHANGELOG.md                ✅ 工作日记
 └── tests/
     ├── mock_data.py              ✅ 成员1维护
     └── test_retriever_accuracy.py ✅ 准确率测试（见本文档附录）

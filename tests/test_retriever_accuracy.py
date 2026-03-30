@@ -17,7 +17,7 @@ from loguru import logger
 from tests.mock_data import MOCK_PARSED_DOC, MOCK_ANSWER_RESULT
 
 try:
-    from modules.retriever.indexer import build_index, get_bm25_data, get_collection
+    from modules.retriever.indexer import build_index, get_collection
     from modules.retriever.hybrid_retriever import retrieve_and_answer
 except ImportError as e:
     logger.error(f"模块导入失败: {e}，请检查 modules/retriever/ 是否已实现")

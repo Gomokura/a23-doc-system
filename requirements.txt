@@ -16,9 +16,10 @@ langchain-community==0.2.0
 openai==1.30.0
 chromadb==0.5.0
 rank-bm25==0.2.2
+bm25s==0.3.3  # 极速 BM25，支持持久化，冷启动比 rank_bm25 快 5-10 倍
 sentence-transformers==3.0.0
-# ReRanker: CrossEncoder (same package as sentence-transformers)
-# e.g. cross-encoder/ms-marco-MiniLM-L-6-v2 or a Chinese reranker model
+# ReRanker: Qwen/Qwen3-Reranker-0.6B (32K context, 65.80 MTEB-R, CPU 可跑)
+# 论文: https://arxiv.org/abs/2506.05176
 
 # Database
 sqlalchemy==2.0.30
