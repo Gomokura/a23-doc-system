@@ -174,7 +174,7 @@ const handleFileSelect = (e: Event) => {
       <!-- 左侧：文件上传 -->
       <div class="col-span-5">
         <label class="block text-sm font-medium text-text2 mb-2">选择文件</label>
-        <div class="bg-white border-2 border-dashed border-border rounded-lg p-12 text-center hover:border-accent transition-colors cursor-pointer h-full flex flex-col items-center justify-center">
+        <label class="bg-white border-2 border-dashed border-border rounded-lg p-12 text-center hover:border-accent transition-colors cursor-pointer h-full flex flex-col items-center justify-center block">
           <div class="text-5xl mb-4">📁</div>
           <div class="text-sm text-text2 mb-2 font-medium">拖拽文件至此，或点击选择</div>
           <div class="text-xs text-muted mb-6">支持 PDF · DOCX · XLSX · TXT · MD</div>
@@ -184,10 +184,10 @@ const handleFileSelect = (e: Event) => {
           <input
             type="file"
             class="hidden"
-            accept=".pdf,.docx,.xlsx,.txt,.md"
+            accept=".pdf,.docx,.xlsx,.txt,.md,.xls"
             @change="handleFileSelect"
           />
-        </div>
+        </label>
       </div>
 
       <!-- 中间：留白 -->
