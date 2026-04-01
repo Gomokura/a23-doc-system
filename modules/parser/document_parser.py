@@ -7,35 +7,47 @@ import os
 import json
 from typing import List, Dict, Any
 from loguru import logger
-import pdfplumber
-from docx import Document
-import openpyxl
 from openai import OpenAI
 from config import settings
+import re
 
 def _chunk_text(text: str, file_id: str, page_num: int = 0) -> List[Dict[str, Any]]:
-    """内部辅助函数：将文本切分为 50-1000 字的 chunk (严格遵守规范 6.2) [cite: 305]"""
+    """
+    基于论文研究改良：Markdown 语义切块 (Semantic Chunking)
+    优先按 Markdown 标题 (#, ##) 进行切分，保证逻辑连贯性
+    """
     chunks = []
-    chunk_size = 500  # 设定为500字一段，符合50-1000的范围要求 [cite: 305]
-    text_length = len(text)
 
-    for i in range(0, text_length, chunk_size):
-        chunk_content = text[i:i+chunk_size].strip()
-        # 如果最后一段太短（小于50字），拼接到上一段，避免出现极短 chunk [cite: 305]
-        if len(chunk_content) < 50 and i != 0:
-            if chunks:
-                chunks[-1]["content"] += "\n" + chunk_content
-            continue
+    # 使用正则按 Markdown 标题或双换行进行初步切分,保证一个完整的章节或一个完整的表格不会被撕裂
+    raw_sections = re.split(r'(?=\n#{1,4} |\n\n)', text)
 
-        if chunk_content:
-            chunk_id = f"{file_id}_{len(chunks)}"
-            chunks.append({
-                "chunk_id": chunk_id,
-                "content": chunk_content,
-                "page": page_num,
-                "chunk_type": "text",
-                "metadata": {}
-            })
+    current_chunk = ""
+    for sec in raw_sections:
+        sec = sec.strip()
+        if not sec: continue
+
+        if len(current_chunk) + len(sec) < 800:
+            current_chunk += sec + "\n\n"
+        else:
+            if current_chunk.strip():
+                chunks.append({
+                    "chunk_id": f"{file_id}_{len(chunks)}",
+                    "content": current_chunk.strip(),
+                    "page": page_num,
+                    "chunk_type": "text",
+                    "metadata": {}
+                })
+            # 如果某一个表格/段落特别长，直接单独立块
+            current_chunk = sec + "\n\n"
+
+    if current_chunk.strip():
+        chunks.append({
+            "chunk_id": f"{file_id}_{len(chunks)}",
+            "content": current_chunk.strip(),
+            "page": page_num,
+            "chunk_type": "text",
+            "metadata": {}
+        })
     return chunks
 
 def _extract_entities_and_summary(chunks: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], str]:
@@ -44,16 +56,33 @@ def _extract_entities_and_summary(chunks: List[Dict[str, Any]]) -> tuple[List[Di
         return [], "文档无有效文本内容"
 
     # 拼接前几个 chunk 的文本给大模型，避免 token 超限
-    sample_text = "\n".join([c["content"] for c in chunks[:3]])
+    # 如果 chunk 数量少于等于3个，直接全给；否则取头、中、尾三个最具代表性的段落
+    # 1. 抽样逻辑保持不变 (头、中、尾)
+    if len(chunks) <= 3:
+        sampled_chunks = chunks
+    else:
+        mid_idx = len(chunks) // 2
+        sampled_chunks = [chunks[0], chunks[mid_idx], chunks[-1]]
+
+    # 2. 拼接文本
+    sample_text = "\n".join([c["content"] for c in sampled_chunks])
+
+    # 3. 加入 Token 防爆阀门
+    # 大多数开源 LLM 处理 5000-8000 个中文字符是极其轻松且便宜的。
+    # 如果拼装后的文本超过 6000 字，直接暴力截断前 6000 字喂给模型。
+    # 截断的文本足够它看出这是什么文档、有什么关键字段了。
+    MAX_CHARS = 6000
+    if len(sample_text) > MAX_CHARS:
+        logger.warning(f"抽样文本长度({len(sample_text)})超过阈值，启动截断保护，截取前 {MAX_CHARS} 字符...")
+        sample_text = sample_text[:MAX_CHARS] + "\n\n...[内容过长，已被截断]..."
 
     try:
-        # 使用 settings 读取大模型配置 [cite: 274-287]
+        # 使用 settings 读取大模型配置
         client = OpenAI(
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
         )
 
-        # 以上提示词目前跑不出来，会超时，等待更换模型或许有希望
         prompt = f"""
         请阅读以下文档片段，提取该文档的核心元数据（实体）和摘要。
         如果是表格数据，请提取：主题、核心字段名称、涉及的区域、时间范围等宏观信息。
@@ -68,19 +97,36 @@ def _extract_entities_and_summary(chunks: List[Dict[str, Any]]) -> tuple[List[Di
         请直接输出JSON结果：
         {{
         """
+
+        logger.info(f"===> 正在向文本大模型 {settings.llm_model} 发起实体抽取请求...")
         response = client.chat.completions.create(
-            model=settings.llm_model,  # 使用 settings 读取模型名称 [cite: 274-287]
+            model=settings.llm_model,
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"} # 强制要求返回 JSON
+            response_format={"type": "json_object"}
         )
+        logger.info("===> 大模型返回实体结果成功！")
+
         result = json.loads(response.choices[0].message.content)
-
         entities = result.get("entities", [])
-        # 溯源填充：将抽取的实体默认映射到第一个 chunk_id 上 [cite: 179-184]
-        for ent in entities:
-            ent["source_chunk_id"] = chunks[0]["chunk_id"]
+        summary = result.get("summary", "摘要生成失败")
 
-        return entities, result.get("summary", "无摘要")
+        # 精准溯源逻辑 (Source Mapping),不再粗暴映射到第一个 chunk，而是遍历抽样 chunk，寻找实体值的真实出处
+        for entity in entities:
+            if not isinstance(entity, dict) or "key" not in entity:
+                continue
+
+            val = str(entity.get("value", ""))
+            found_chunk_id = sampled_chunks[0]["chunk_id"]  # 兜底默认值
+
+            # 如果值有效，去 chunk 文本里找它具体在哪一段
+            if val and val not in ["未明确", "未提及", "无"]:
+                for c in sampled_chunks:
+                    if val in c["content"]:
+                        found_chunk_id = c["chunk_id"]
+                        break
+
+            entity["source_chunk_id"] = found_chunk_id
+        return entities, summary
 
     except Exception as e:
         logger.error(f"LLM 抽取实体/摘要失败: {e}")
@@ -135,29 +181,52 @@ def parse_document(file_path: str, file_id: str) -> dict:
     try:
         # 1. 针对不同格式进行底层解析 [cite: 126-130, 304]
         if ext in ['.txt', '.md']:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            # 加上 errors='ignore' 防止极个别非标准 utf-8 编码导致崩溃
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 text = f.read()
-                chunks.extend(_chunk_text(text, file_id))
+                # 这里的 _chunk_text 已经升级为语义切块，MD 文件会自动按标题切分，TXT 会按段落切分
+                # 防空块过滤
+                if text:
+                    chunks.extend(_chunk_text(text, file_id))
+
 
         elif ext == '.docx':
             import docx
 
-            docx_text = []
+            docx_md = []
             try:
-                # 🛡️ 战术 1: 标准 python-docx 读取 (应对 95% 的标准 Word 文件)
+                # 🛡️ 战术 1: 语义化提取 (保留标题层级和标准表格)
                 doc = docx.Document(file_path)
+
+                # 1. 提取段落并识别标题级数
                 for para in doc.paragraphs:
-                    if para.text.strip():
-                        docx_text.append(para.text.strip())
+                    text = para.text.strip()
+                    if not text: continue
+                    style_name = para.style.name.lower()
+                    if 'heading 1' in style_name or '标题 1' in style_name:
+                        docx_md.append(f"# {text}")
+                    elif 'heading 2' in style_name or '标题 2' in style_name:
+                        docx_md.append(f"## {text}")
+                    elif 'heading 3' in style_name or '标题 3' in style_name:
+                        docx_md.append(f"### {text}")
+                    else:
+                        docx_md.append(text)
 
+                # 2. 提取表格为标准的 Markdown 格式
                 for table in doc.tables:
-                    for row in table.rows:
-                        row_data = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-                        if row_data:
-                            docx_text.append(" | ".join(row_data))
-
-                if docx_text:
-                    chunks.extend(_chunk_text("\n".join(docx_text), file_id))
+                    md_table = []
+                    for i, row in enumerate(table.rows):
+                        # 清理单元格内的换行符，防止破坏 Markdown 结构
+                        row_data = [cell.text.replace('\n', ' ').strip() for cell in row.cells]
+                        md_table.append("| " + " | ".join(row_data) + " |")
+                        # 补充表头下方的分隔线
+                        if i == 0:
+                            md_table.append("|" + "|".join(["---"] * len(row.cells)) + "|")
+                    if md_table:
+                        docx_md.append("\n" + "\n".join(md_table) + "\n")
+                if docx_md:
+                    # 将组装好的纯正 Markdown 送入语义切块器
+                    chunks.extend(_chunk_text("\n\n".join(docx_md), file_id))
 
             except Exception as e:
                 logger.warning(f"python-docx 解析异常，启动底层 XML 强读引擎: {e}")
@@ -204,24 +273,39 @@ def parse_document(file_path: str, file_id: str) -> dict:
                     raise ValueError(f"DOCX 文件损坏严重，底层解析彻底失败: {str(ex)}")
 
 
+
         elif ext == '.xlsx':
+            import pandas as pd
+            import warnings
+
             try:
-                # 尝试使用官方推荐的 openpyxl
-                import warnings
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    wb = openpyxl.load_workbook(file_path, data_only=True)
-                    for sheet in wb.worksheets:
-                        sheet_text = []
-                        for row in sheet.iter_rows(values_only=True):
-                            row_data = [str(cell) for cell in row if cell is not None]
-                            if row_data:
-                                sheet_text.append(" | ".join(row_data))
-                        if sheet_text:
-                            chunks.extend(_chunk_text("\n".join(sheet_text), file_id))
-                # 如果遭遇非标准/损坏的Excel文件导致读出空数据，主动抛出异常触发降级
+                    # 使用 pandas 一次性读取所有的 sheet
+                    xls = pd.ExcelFile(file_path)
+                    for sheet_name in xls.sheet_names:
+                        df = pd.read_excel(xls, sheet_name=sheet_name)
+                        if df.empty:
+                            continue
+                        # 填充空值，避免出现 nan 影响大模型判断
+                        df = df.fillna("")
+                        headers = df.columns.tolist()
+                        # 把 Sheet 名称作为 Markdown 的二级标题
+                        md_lines = [f"## 表格工作簿：{sheet_name}\n"]
+                        # 拼装标准 Markdown 表头
+                        md_lines.append("| " + " | ".join([str(h).replace('\n', ' ') for h in headers]) + " |")
+                        md_lines.append("|" + "|".join(["---"] * len(headers)) + "|")
+
+                        # 拼装数据行
+                        for _, row in df.iterrows():
+                            row_data = [str(item).replace('\n', ' ').strip() for item in row]
+                            md_lines.append("| " + " | ".join(row_data) + " |")
+                        sheet_md = "\n".join(md_lines)
+                        chunks.extend(_chunk_text(sheet_md, file_id))
+
                 if not chunks:
-                    raise ValueError("openpyxl 提取内容为空")
+                    raise ValueError("常规引擎提取内容为空")
+
             except Exception as e:
                 logger.warning(f"openpyxl 解析异常，遭遇非标准或假 Excel 文件，启动 pandas 强力降级解析引擎: {e}")
                 import pandas as pd
@@ -285,18 +369,75 @@ def parse_document(file_path: str, file_id: str) -> dict:
                 if sheet_text and sheet_text.strip():
                     chunks.extend(_chunk_text(sheet_text, file_id))
 
-        elif ext == '.pdf':
-            with pdfplumber.open(file_path) as pdf:
-                for i, page in enumerate(pdf.pages):
-                    text = page.extract_text()
-                    if text:
-                        chunks.extend(_chunk_text(text, file_id, page_num=i+1))
 
-        # 2. 调用大模型抽取关键实体与摘要 [cite: 179-186]
-        logger.info(f"文档读取完毕，成功切分为 {len(chunks)} 个 chunks。正在调用大模型提取信息...")
+        elif ext == '.pdf':
+            import fitz  # PyMuPDF
+            import base64
+            import re
+
+            # 屏蔽底层的底层红字警告
+            fitz.TOOLS.mupdf_display_errors(False)
+            logger.info("PDF 文件：启动基于视觉大模型(VLM)的端到端解析引擎...")
+
+            client = OpenAI(
+                api_key=settings.vlm_api_key,
+                base_url=settings.vlm_base_url,
+            )
+
+            doc = fitz.open(file_path)
+            for i, page in enumerate(doc):
+                # 将 PDF 页面渲染为图片
+                pix = page.get_pixmap(dpi=150)
+                b64_img = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+                prompt_text = (
+                    "请将这张图片中的文档内容完美转换为标准的Markdown格式。\n"
+                    "要求：\n"
+                    "1. 严格保留所有的表格结构（使用Markdown表格表示）。\n"
+                    "2. 严格保留所有的标题层级（使用#表示）。\n"
+                    "3. 如果有公式，请尽量使用LaTeX语法。\n"
+                    "4. 不要包含任何开场白或解释性废话，只输出Markdown正文。"
+                )
+
+                try:
+                    # 🚀 只有这里！仅使用 VLM 把图片变成 Markdown 文本
+                    response = client.chat.completions.create(
+                        model=settings.vlm_model,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}},
+                                    {"type": "text", "text": prompt_text}
+                                ]
+                            }
+                        ]
+                    )
+
+                    page_md = response.choices[0].message.content.strip()
+                    page_md = re.sub(r'^```markdown\n|```$', '', page_md, flags=re.IGNORECASE | re.MULTILINE).strip()
+
+                    if page_md:
+                        # 转换出来的 Markdown 文本直接送入写好的高级切块器
+                        chunks.extend(_chunk_text(page_md, file_id, page_num=i + 1))
+
+
+                except Exception as ve:
+                    logger.error(f"第 {i + 1} 页 VLM 解析失败: {ve}")
+                    raise RuntimeError(f"视觉大模型解析失败，请检查网络或 API 配置: {ve}")
+            doc.close()
+
+        # ═══════════════════════════════════════════════════════
+        # 所有格式解析完毕，chunks 收集完成！
+        # 下面进入统一的实体和摘要抽取阶段 (使用普通的文本大模型)
+        # ═══════════════════════════════════════════════════════
+
+        # 2. 调用普通文本大模型抽取关键实体与摘要
+        logger.info(f"文档切分完毕 (共 {len(chunks)} 块)。正在调用普通文本大模型提取实体和摘要...")
+
+        # 你的 _extract_entities_and_summary 函数内部使用的是 settings.llm_model，完美解耦！
         entities, summary = _extract_entities_and_summary(chunks)
 
-        # 3. 严格组装返回结果，遵守 4.1 Schema 规范 [cite: 165-187, 299]
+        # 3. 严格组装返回结果
         parsed_document = {
             "file_id": file_id,
             "filename": filename,
@@ -306,7 +447,7 @@ def parse_document(file_path: str, file_id: str) -> dict:
             "summary": summary
         }
 
-        logger.success(f"✅ 文件解析与抽取完成: {filename} | 提取实体数: {len(entities)}")
+        logger.success(f"✅ 文件解析完成: {filename} | 提取实体数: {len(entities)}")
         return parsed_document
 
     except Exception as e:
@@ -314,45 +455,45 @@ def parse_document(file_path: str, file_id: str) -> dict:
         raise RuntimeError(f"文件解析失败: {str(e)}")
 
 
-# # --- 在 document_parser.py 文件最底部加上这段 ---  用于暂时测试
-# if __name__ == "__main__":
-#     import json
-#     import os
-#
-#     # 1. 指定你的真实测试集目录 (使用 r 前缀防止路径里的 \ 被转义)
-#     test_dir = r"E:\AAAjlu\a23-doc-system\测试集\txt"
-#
-#     print(f"🚀 开始执行本地真实文件测试，读取目录: {test_dir}")
-#
-#     if not os.path.exists(test_dir):
-#         print(f"\n❌ 找不到测试集目录，请检查路径: {test_dir}")
-#     else:
-#         # 2. 遍历测试目录下的所有文件
-#         for idx, filename in enumerate(os.listdir(test_dir)):
-#             file_path = os.path.join(test_dir, filename)
-#
-#             print(f"\n" + "=" * 50)
-#             print(f"📄 正在测试文件: {filename}")
-#
-#             # 给每个文件生成一个假的 file_id 用于测试
-#             mock_file_id = f"test-real-{idx + 1:03d}"
-#
-#             try:
-#                 # 调用你的核心解析函数
-#                 result = parse_document(file_path, mock_file_id)
-#
-#                 print(f"🎉 {filename} 解析成功！")
-#                 print(
-#                     f"📊 统计: 生成了 {len(result.get('chunks', []))} 个文本块(chunks), 提取了 {len(result.get('entities', []))} 个实体。")
-#
-#                 # 为了防止终端输出太长刷屏，这里只打印实体和摘要看看大模型的效果
-#                 # 如果你想看完整的 chunks 文本，可以把下面这行的注释解开
-#                 print("\n💡 提取到的实体:")
-#                 print(json.dumps(result.get("entities", []), ensure_ascii=False, indent=2))
-#                 print(f"\n📝 文档摘要:\n{result.get('summary', '')}")
-#
-#             except Exception as e:
-#                 print(f"❌ {filename} 解析过程中发生报错: {e}")
-#
-#         print(f"\n" + "=" * 50)
-#         print("🏁 所有测试文件处理完毕！")
+# 用于暂时测试
+if __name__ == "__main__":
+    import json
+    import os
+
+    # 1. 指定你的真实测试集目录 (使用 r 前缀防止路径里的 \ 被转义)
+    test_dir = r"E:\AAAjlu\a23-doc-system\测试集\pdf"
+
+    print(f"🚀 开始执行本地真实文件测试，读取目录: {test_dir}")
+
+    if not os.path.exists(test_dir):
+        print(f"\n❌ 找不到测试集目录，请检查路径: {test_dir}")
+    else:
+        # 2. 遍历测试目录下的所有文件
+        for idx, filename in enumerate(os.listdir(test_dir)):
+            file_path = os.path.join(test_dir, filename)
+
+            print(f"\n" + "=" * 50)
+            print(f"📄 正在测试文件: {filename}")
+
+            # 给每个文件生成一个假的 file_id 用于测试
+            mock_file_id = f"test-real-{idx + 1:03d}"
+
+            try:
+                # 调用你的核心解析函数
+                result = parse_document(file_path, mock_file_id)
+
+                print(f"🎉 {filename} 解析成功！")
+                print(
+                    f"📊 统计: 生成了 {len(result.get('chunks', []))} 个文本块(chunks), 提取了 {len(result.get('entities', []))} 个实体。")
+
+                # 为了防止终端输出太长刷屏，这里只打印实体和摘要看看大模型的效果
+                # 如果你想看完整的 chunks 文本，可以把下面这行的注释解开
+                print("\n💡 提取到的实体:")
+                print(json.dumps(result.get("entities", []), ensure_ascii=False, indent=2))
+                print(f"\n📝 文档摘要:\n{result.get('summary', '')}")
+
+            except Exception as e:
+                print(f"❌ {filename} 解析过程中发生报错: {e}")
+
+        print(f"\n" + "=" * 50)
+        print("🏁 所有测试文件处理完毕！")
