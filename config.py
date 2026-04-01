@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://localhost:11434/v1"
     llm_model:    str = "qwen3:8b"
 
+    # 👇 -------- 新增：VLM 视觉大模型配置 (专供 PDF 图片解析) -------- 👇
+    vlm_api_key: str = "填入你的云端视觉大模型API_KEY"  # 建议用硅基流动等免费/廉价的云端 API
+    vlm_base_url: str = "https://api.siliconflow.cn/v1"
+    vlm_model: str = "Qwen/Qwen2-VL-72B-Instruct"  # 强大的视觉模型
+    # 👆 ----------------------------------------------------------- 👆
+
     # 嵌入模型（本地运行，Kaggle 可用）
     embed_model: str = "BAAI/bge-small-zh-v1.5"
 
