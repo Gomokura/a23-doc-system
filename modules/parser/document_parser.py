@@ -455,45 +455,45 @@ def parse_document(file_path: str, file_id: str) -> dict:
         raise RuntimeError(f"文件解析失败: {str(e)}")
 
 
-# 用于暂时测试
-if __name__ == "__main__":
-    import json
-    import os
+# # 用于暂时测试
+# if __name__ == "__main__":
+#     import json
+#     import os
 
-    # 1. 指定你的真实测试集目录 (使用 r 前缀防止路径里的 \ 被转义)
-    test_dir = r"E:\AAAjlu\a23-doc-system\测试集\pdf"
+#     # 1. 指定你的真实测试集目录 (使用 r 前缀防止路径里的 \ 被转义)
+#     test_dir = r"E:\AAAjlu\a23-doc-system\测试集\pdf"
 
-    print(f"🚀 开始执行本地真实文件测试，读取目录: {test_dir}")
+#     print(f"🚀 开始执行本地真实文件测试，读取目录: {test_dir}")
 
-    if not os.path.exists(test_dir):
-        print(f"\n❌ 找不到测试集目录，请检查路径: {test_dir}")
-    else:
-        # 2. 遍历测试目录下的所有文件
-        for idx, filename in enumerate(os.listdir(test_dir)):
-            file_path = os.path.join(test_dir, filename)
+#     if not os.path.exists(test_dir):
+#         print(f"\n❌ 找不到测试集目录，请检查路径: {test_dir}")
+#     else:
+#         # 2. 遍历测试目录下的所有文件
+#         for idx, filename in enumerate(os.listdir(test_dir)):
+#             file_path = os.path.join(test_dir, filename)
 
-            print(f"\n" + "=" * 50)
-            print(f"📄 正在测试文件: {filename}")
+#             print(f"\n" + "=" * 50)
+#             print(f"📄 正在测试文件: {filename}")
 
-            # 给每个文件生成一个假的 file_id 用于测试
-            mock_file_id = f"test-real-{idx + 1:03d}"
+#             # 给每个文件生成一个假的 file_id 用于测试
+#             mock_file_id = f"test-real-{idx + 1:03d}"
 
-            try:
-                # 调用你的核心解析函数
-                result = parse_document(file_path, mock_file_id)
+#             try:
+#                 # 调用你的核心解析函数
+#                 result = parse_document(file_path, mock_file_id)
 
-                print(f"🎉 {filename} 解析成功！")
-                print(
-                    f"📊 统计: 生成了 {len(result.get('chunks', []))} 个文本块(chunks), 提取了 {len(result.get('entities', []))} 个实体。")
+#                 print(f"🎉 {filename} 解析成功！")
+#                 print(
+#                     f"📊 统计: 生成了 {len(result.get('chunks', []))} 个文本块(chunks), 提取了 {len(result.get('entities', []))} 个实体。")
 
-                # 为了防止终端输出太长刷屏，这里只打印实体和摘要看看大模型的效果
-                # 如果你想看完整的 chunks 文本，可以把下面这行的注释解开
-                print("\n💡 提取到的实体:")
-                print(json.dumps(result.get("entities", []), ensure_ascii=False, indent=2))
-                print(f"\n📝 文档摘要:\n{result.get('summary', '')}")
+#                 # 为了防止终端输出太长刷屏，这里只打印实体和摘要看看大模型的效果
+#                 # 如果你想看完整的 chunks 文本，可以把下面这行的注释解开
+#                 print("\n💡 提取到的实体:")
+#                 print(json.dumps(result.get("entities", []), ensure_ascii=False, indent=2))
+#                 print(f"\n📝 文档摘要:\n{result.get('summary', '')}")
 
-            except Exception as e:
-                print(f"❌ {filename} 解析过程中发生报错: {e}")
+#             except Exception as e:
+#                 print(f"❌ {filename} 解析过程中发生报错: {e}")
 
-        print(f"\n" + "=" * 50)
-        print("🏁 所有测试文件处理完毕！")
+#         print(f"\n" + "=" * 50)
+#         print("🏁 所有测试文件处理完毕！")
