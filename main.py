@@ -20,11 +20,11 @@ from errors import AppError
 async def lifespan(app: FastAPI):
     # 启动时初始化数据库
     init_db()
-    print(f"✅ 数据库初始化完成")
-    print(f"✅ 服务启动: http://{settings.host}:{settings.port}")
-    print(f"✅ API文档:  http://{settings.host}:{settings.port}/docs")
+    print("[OK] Database initialized")
+    print(f"[OK] Server running: http://{settings.host}:{settings.port}")
+    print(f"[OK] API docs:        http://{settings.host}:{settings.port}/docs")
     yield
-    print("🛑 服务关闭")
+    print("[STOP] Server shutting down")
 
 
 # ── FastAPI 实例 ───────────────────────────────────────────────

@@ -441,17 +441,16 @@ def _bm25_search(query: str, file_ids: list = None) -> Tuple[dict, dict]:
     query_tokens = [t.strip() for t in query_tokens if t.strip()]
     logger.info(f"BM25S 分词结果: query='{query}' -> {query_tokens}")
 
-    # retrieve 返回 (top_doc_ids, top_scores)，k=None 取全部
+    # retrieve 返回 namedtuple(result.documents, result.scores)，k=None 取全部
     # BM25S.load(load_corpus=True) 会把 corpus 存入对象内部，corpus=None 则自动用内部的
-    top_doc_ids, top_scores = _BM25_INDEX.retrieve(
+    result = _BM25_INDEX.retrieve(
         [query_tokens],
         corpus=None,
         k=len(_BM25_CORPUS),
-        return_as="extension",
+        return_as="tuple",
     )
-
-    doc_ids = top_doc_ids[0] if len(top_doc_ids) else []
-    scores = top_scores[0] if len(top_scores) else []
+    doc_ids = result.documents[0] if len(result.documents) else []
+    scores = result.scores[0] if len(result.scores) else []
 
     for idx, score in zip(doc_ids, scores):
         idx_int = int(idx)

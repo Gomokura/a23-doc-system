@@ -106,7 +106,14 @@ def _extract_entities_and_summary(chunks: List[Dict[str, Any]]) -> tuple[List[Di
         )
         logger.info("===> 大模型返回实体结果成功！")
 
-        result = json.loads(response.choices[0].message.content)
+        # 兼容 qwen3 思考模式：回复内容可能在 reasoning 字段而非 content
+        raw_content = response.choices[0].message.content
+        raw_reasoning = getattr(response.choices[0].message, "reasoning", None) or ""
+        if not raw_content and raw_reasoning:
+            raw_content = raw_reasoning
+            logger.warning("content 字段为空，已从 reasoning 字段提取回复（qwen3 思考模式）")
+
+        result = json.loads(raw_content)
         entities = result.get("entities", [])
         summary = result.get("summary", "摘要生成失败")
 

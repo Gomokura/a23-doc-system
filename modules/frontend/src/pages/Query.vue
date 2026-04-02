@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 
 interface Evidence {
@@ -23,44 +23,11 @@ interface QueryResult {
 
 const query = ref('')
 const fileIds = ref<string[]>([])
+const filesList = ref<{ file_id: string; filename: string; status: string }[]>([])
 const loading = ref(false)
 const expandedSources = ref<Set<number>>(new Set())
 
 const result = ref<QueryResult | null>(null)
-
-// Mock 数据
-const mockResult: QueryResult = {
-  answer: '合同总金额为 500 万元人民币，分三期支付。第一期 200 万元在签署后 30 天内支付，第二期 200 万元在交付后 30 天内支付，第三期 100 万元在验收后 30 天内支付。',
-  confidence: 94,
-  sources: [
-    {
-      filename: '采购合同_2024.pdf',
-      page: 3,
-      content: '合同总金额：500万元人民币，分三期支付。第一期200万元在签署后30天内支付...',
-      relevance: 98,
-      confidence: 99
-    },
-    {
-      filename: '财务报表_Q1.xlsx',
-      page: 5,
-      content: '合同金额: 5,000,000 元，付款方式：分期付款',
-      relevance: 85,
-      confidence: 92
-    },
-    {
-      filename: '采购计划_2024.docx',
-      page: 2,
-      content: '预算金额 500 万元用于采购项目',
-      relevance: 72,
-      confidence: 88
-    }
-  ],
-  explanation: {
-    why: '2 个高相关文档都明确提到此金额和付款方式，信息一致',
-    alternatives: '未发现矛盾信息，其他文档也支持此结论',
-    credibility: '来自官方财务文档和合同，可信度高'
-  }
-}
 
 const toggleSource = (index: number) => {
   if (expandedSources.value.has(index)) {
@@ -94,24 +61,50 @@ const handleQuery = async () => {
   expandedSources.value.clear()
 
   try {
-    // TODO: 替换为真实 API 调用
-    // const response = await fetch('http://localhost:8000/query', {
-    //   method: 'POST',
-    //   headers: { 'Content-Type': 'application/json' },
-    //   body: JSON.stringify({
-    //     query: query.value,
-    //     file_ids: fileIds.value,
-    //   }),
-    // })
-    // const data = await response.json()
-    // result.value = data
+    const response = await fetch('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: query.value,
+        file_ids: fileIds.value,
+      }),
+    })
 
-    // 使用 mock 数据
-    await new Promise(resolve => setTimeout(resolve, 800))
-    result.value = mockResult
+    if (!response.ok) {
+      const err = await response.json()
+      throw new Error(err.detail || '查询失败')
+    }
+
+    const data = await response.json()
+
+    // 将 API 返回格式映射为前端 QueryResult 格式
+    result.value = {
+      answer: data.answer || '无法生成答案',
+      confidence: typeof data.confidence === 'number' && data.confidence >= 0
+        ? Math.round(data.confidence * 100)
+        : 0,
+      sources: (data.sources || []).map((s: any, idx: number) => ({
+        filename: s.source_file || s.filename || '未知文件',
+        page: s.page || 0,
+        content: s.content || '',
+        relevance: s.relevance || s.score ? Math.round((s.relevance || s.score) * 100) : 80,
+        confidence: s.confidence || s.score ? Math.round((s.confidence || s.score) * 100) : 80,
+      })),
+      explanation: {
+        why: data.fusion?.has_conflicts
+          ? `检测到 ${data.fusion.conflict_count} 处信息冲突，系统已融合多源信息给出答案`
+          : '基于检索到的文档片段生成答案，相关度高',
+        alternatives: data.fusion?.has_conflicts
+          ? (data.fusion.conflict_details || []).map((c: any) => c.description).join('；')
+          : '未发现明显冲突信息',
+        credibility: data.confidence && data.confidence >= 0.7
+          ? '答案置信度高，来源可靠'
+          : '答案仅供参考，建议进一步核实',
+      },
+    }
     ElMessage.success('查询成功')
-  } catch (error) {
-    ElMessage.error('查询失败')
+  } catch (error: any) {
+    ElMessage.error(error.message || '查询失败')
   } finally {
     loading.value = false
   }
@@ -119,13 +112,19 @@ const handleQuery = async () => {
 
 const handleRefresh = async () => {
   try {
-    const response = await fetch('http://localhost:8000/files')
+    const response = await fetch('/api/files')
     const data = await response.json()
-    fileIds.value = data.files?.map((f: any) => f.file_id) || []
+    filesList.value = data.files || []
+    fileIds.value = (data.files || [])
+      .filter((f: any) => f.status === 'indexed')
+      .map((f: any) => f.file_id)
   } catch (error) {
     ElMessage.error('刷新文件列表失败')
   }
 }
+
+// 页面打开时自动加载一次文档列表
+onMounted(handleRefresh)
 </script>
 
 <template>
@@ -153,7 +152,14 @@ const handleRefresh = async () => {
             multiple
             class="w-full px-3 py-2 bg-white border border-border rounded-md text-sm text-text focus:border-accent focus:outline-none"
           >
-            <option value="">选择文档...</option>
+            <option value="">选择文档（可多选）...</option>
+            <option
+              v-for="f in filesList"
+              :key="f.file_id"
+              :value="f.file_id"
+            >
+              {{ f.filename }} ({{ f.status }})
+            </option>
           </select>
           <button
             @click="handleRefresh"

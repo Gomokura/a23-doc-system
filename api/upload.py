@@ -4,6 +4,7 @@
 """
 import uuid
 import os
+import re
 import hashlib
 import asyncio
 from datetime import datetime, timezone
@@ -280,3 +281,200 @@ def _update_task(db, task_id: str, status: str, progress: int = None, error_msg:
         if error_msg is not None:
             task.error_msg = error_msg
         db.commit()
+
+
+# ── POST /template/placeholders ─────────────────────────────────
+@router.post("/template/placeholders", summary="解析模板占位符")
+async def extract_placeholders(body: dict, db: Session = Depends(get_db)):
+    """
+    智能解析模板内容，自动识别要填写的字段。
+    - 支持 {{占位符}} 格式（有明确标记）
+    - 对于普通表格/文档，使用 LLM 智能推断需要填写的字段
+    请求体: { "template_file_id": "xxx" }
+    返回:  { "fields": ["合同金额", "甲方名称", ...], "method": "placeholder|llm" }
+    """
+    file_id = body.get("template_file_id")
+    if not file_id:
+        raise AppError(400, "INVALID_REQUEST", "缺少 template_file_id")
+
+    record = db.query(FileRecord).filter_by(file_id=file_id).first()
+    if not record:
+        raise AppError(404, "FILE_NOT_FOUND", f"模板文件 {file_id} 不存在")
+
+    if record.file_type not in ("docx", "xlsx"):
+        raise AppError(400, "INVALID_FILE_TYPE", "仅支持 .docx 和 .xlsx 模板")
+
+    try:
+        # 先找 {{占位符}}
+        fields = _extract_placeholders(record.file_path, record.file_type)
+
+        if fields:
+            return {"fields": fields, "count": len(fields), "method": "placeholder"}
+
+        # 没有占位符 → 调用 LLM 智能分析模板内容，推断要填的字段
+        text_content = _extract_template_text(record.file_path, record.file_type)
+        if not text_content:
+            return {"fields": [], "count": 0, "method": "none", "message": "模板内容为空"}
+
+        llm_fields = await _llm_extract_fields(text_content, record.file_type)
+        return {"fields": llm_fields, "count": len(llm_fields), "method": "llm"}
+
+    except Exception as e:
+        raise AppError(500, "PARSE_FAILED", f"解析模板失败：{str(e)}")
+
+
+def _extract_template_text(file_path: str, file_type: str) -> str:
+    """提取模板文本内容（不含格式），用于 LLM 分析。严格限制总字符数。"""
+    MAX_CHARS = 1500  # 约 1000 tokens，留足够空间给 prompt
+
+    if file_type == "docx":
+        from docx import Document
+        doc = Document(file_path)
+        parts = []
+        total = 0
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if text:
+                if total + len(text) + 1 > MAX_CHARS:
+                    break
+                parts.append(text)
+                total += len(text) + 1
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                if row_text:
+                    if total + len(row_text) + 1 > MAX_CHARS:
+                        break
+                    parts.append(row_text)
+                    total += len(row_text) + 1
+            if total >= MAX_CHARS:
+                break
+        return "\n".join(parts)
+
+    elif file_type == "xlsx":
+        # Excel 智能提取：只取前3行（通常含表头），字符数极少
+        from openpyxl import load_workbook
+        wb = load_workbook(file_path, data_only=True)
+        parts = []
+        total = 0
+        for sheet in wb.worksheets:
+            parts.append(f"[Sheet: {sheet.title}]")
+            total += len(sheet.title) + 12
+            rows_taken = 0
+            for row in sheet.iter_rows(values_only=True):
+                if rows_taken >= 3 or total >= MAX_CHARS:
+                    break
+                row_vals = [str(c) if c is not None else "" for c in row]
+                row_text = " | ".join(v for v in row_vals if v)
+                if row_text:
+                    parts.append(row_text)
+                    total += len(row_text) + 1
+                rows_taken += 1
+        wb.close()
+        return "\n".join(parts)
+
+    return ""
+
+
+async def _llm_extract_fields(text_content: str, file_type: str) -> list[str]:
+    """
+    调用 LLM 智能分析模板内容，推断需要填写的字段。
+    例如：看到"合同金额"、"甲方"、"签署日期"等表头，推断出字段名。
+    """
+    from openai import OpenAI
+    from config import settings
+
+    prompt = f"""你是一个文档分析专家。请分析以下{file_type}模板的内容，识别出需要填写/补充的字段名称。
+
+要求：
+1. 只输出字段名，每行一个，不要任何解释
+2. 优先输出表格表头、空格/横线处的标题
+3. 不要输出已填写了具体数值的行（只输出空缺的、需要填写的）
+4. 字段名要简洁，如"合同金额"、"甲方名称"，不要超过15个字
+5. 只输出需要填写的字段，不要输出文档标题、说明文字等
+
+{file_type}内容：
+{text_content[:3000]}
+"""
+
+    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+    resp = client.chat.completions.create(
+        model=settings.llm_model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1,
+        max_tokens=300,
+    )
+    raw = resp.choices[0].message.content or ""
+
+    # 解析 LLM 输出，每行一个字段名
+    fields = []
+    for line in raw.split("\n"):
+        line = line.strip().strip("•-*1234567890.、 ")
+        if line and 1 < len(line) <= 20:
+            fields.append(line)
+
+    # 去重
+    seen = set()
+    unique = []
+    for f in fields:
+        if f not in seen:
+            seen.add(f)
+            unique.append(f)
+    return unique
+
+
+def _extract_placeholders(file_path: str, file_type: str) -> list[str]:
+    """从 docx/xlsx 文件中提取所有 {{字段名}} 占位符"""
+    seen = set()
+    fields = []
+
+    if file_type == "docx":
+        from docx import Document
+        doc = Document(file_path)
+        # 遍历段落
+        for para in doc.paragraphs:
+            for m in re.finditer(r'\{\{(.+?)\}\}', para.text):
+                key = m.group(1).strip()
+                if key and key not in seen:
+                    seen.add(key)
+                    fields.append(key)
+        # 遍历表格
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
+                        for m in re.finditer(r'\{\{(.+?)\}\}', para.text):
+                            key = m.group(1).strip()
+                            if key and key not in seen:
+                                seen.add(key)
+                                fields.append(key)
+
+    elif file_type == "xlsx":
+        from openpyxl import load_workbook
+        wb = load_workbook(file_path, data_only=False)
+        for sheet in wb.worksheets:
+            merged_cells = {
+                str(cell)
+                for rng in sheet.merged_cells.ranges
+                for cell in rng.cells
+            }
+            for row in sheet.iter_rows():
+                for cell in row:
+                    # 跳过合并单元格的从属格
+                    if cell.coordinate in merged_cells:
+                        is_master = any(
+                            cell.row == rng.min_row and cell.column == rng.min_col
+                            for rng in sheet.merged_cells.ranges
+                        )
+                        if not is_master:
+                            continue
+                    val = cell.value
+                    if val and isinstance(val, str):
+                        for m in re.finditer(r'\{\{(.+?)\}\}', val):
+                            key = m.group(1).strip()
+                            if key and key not in seen:
+                                seen.add(key)
+                                fields.append(key)
+        wb.close()
+
+    return fields
