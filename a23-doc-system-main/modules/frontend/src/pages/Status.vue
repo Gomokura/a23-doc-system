@@ -3,27 +3,46 @@ import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 
 interface FileRecord {
-  file_id: string
   filename: string
-  file_size: number
   status: string
-  chunk_count: number
-  uploaded_at: string
+  page_count: number
+  file_id: string
 }
 
-const API_BASE = 'http://localhost:8000'
+interface RAGASMetrics {
+  retrieval: {
+    recall: number
+    precision: number
+    mrr: number
+  }
+  context: {
+    relevance: number
+    accuracy: number
+    coverage: number
+  }
+  generation: {
+    faithfulness: number
+    relevance: number
+    completeness: number
+  }
+  performance: {
+    avg_response_ms: number
+    p95_response_ms: number
+    throughput: number
+  }
+}
 
 const files = ref<FileRecord[]>([])
 const health = ref<any>(null)
 const loading = ref(false)
-
-const ragasMetrics = ref({
+const ragasMetrics = ref<RAGASMetrics>({
   retrieval: { recall: 85, precision: 92, mrr: 0.88 },
   context: { relevance: 89, accuracy: 91, coverage: 87 },
   generation: { faithfulness: 94, relevance: 96, completeness: 88 },
   performance: { avg_response_ms: 1200, p95_response_ms: 2100, throughput: 45 }
 })
 
+// 进度条颜色
 const getMetricColor = (value: number) => {
   if (value >= 90) return 'bg-green'
   if (value >= 80) return 'bg-accent'
@@ -31,6 +50,7 @@ const getMetricColor = (value: number) => {
   return 'bg-red'
 }
 
+// 进度条宽度
 const getMetricWidth = (value: number) => {
   return `${Math.min(value, 100)}%`
 }
@@ -39,13 +59,18 @@ const handleRefresh = async () => {
   loading.value = true
 
   try {
-    const filesResponse = await fetch(`${API_BASE}/files?size=100`)
+    const filesResponse = await fetch('http://localhost:8000/files')
     const filesData = await filesResponse.json()
     files.value = filesData.files || []
 
-    const healthResponse = await fetch(`${API_BASE}/health`)
+    const healthResponse = await fetch('http://localhost:8000/health')
     const healthData = await healthResponse.json()
     health.value = healthData
+
+    // TODO: 后端提供 RAGAS 指标时，替换 mock 数据
+    // const ragasResponse = await fetch('http://localhost:8000/metrics/ragas')
+    // const ragasData = await ragasResponse.json()
+    // ragasMetrics.value = ragasData
 
     ElMessage.success('状态已刷新')
   } catch (error) {
@@ -87,7 +112,7 @@ onMounted(() => {
         <div class="space-y-4">
           <div>
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-text2">召回率</span>
+              <span class="text-xs text-text2">召回率 (Recall)</span>
               <span class="text-sm font-semibold text-accent">{{ ragasMetrics.retrieval.recall }}%</span>
             </div>
             <div class="w-full bg-surface2 rounded-full h-2 overflow-hidden">
@@ -100,7 +125,7 @@ onMounted(() => {
           </div>
           <div>
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-text2">精准率</span>
+              <span class="text-xs text-text2">精准率 (Precision)</span>
               <span class="text-sm font-semibold text-accent">{{ ragasMetrics.retrieval.precision }}%</span>
             </div>
             <div class="w-full bg-surface2 rounded-full h-2 overflow-hidden">
@@ -113,7 +138,7 @@ onMounted(() => {
           </div>
           <div>
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-text2">MRR</span>
+              <span class="text-xs text-text2">MRR (Mean Reciprocal Rank)</span>
               <span class="text-sm font-semibold text-accent">{{ ragasMetrics.retrieval.mrr.toFixed(2) }}</span>
             </div>
             <div class="w-full bg-surface2 rounded-full h-2 overflow-hidden">
@@ -136,7 +161,7 @@ onMounted(() => {
         <div class="space-y-4">
           <div>
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-text2">相关性</span>
+              <span class="text-xs text-text2">上下文相关性</span>
               <span class="text-sm font-semibold text-accent">{{ ragasMetrics.context.relevance }}%</span>
             </div>
             <div class="w-full bg-surface2 rounded-full h-2 overflow-hidden">
@@ -149,7 +174,7 @@ onMounted(() => {
           </div>
           <div>
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-text2">精准性</span>
+              <span class="text-xs text-text2">上下文精准性</span>
               <span class="text-sm font-semibold text-accent">{{ ragasMetrics.context.accuracy }}%</span>
             </div>
             <div class="w-full bg-surface2 rounded-full h-2 overflow-hidden">
@@ -162,7 +187,7 @@ onMounted(() => {
           </div>
           <div>
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-text2">覆盖率</span>
+              <span class="text-xs text-text2">上下文覆盖率</span>
               <span class="text-sm font-semibold text-accent">{{ ragasMetrics.context.coverage }}%</span>
             </div>
             <div class="w-full bg-surface2 rounded-full h-2 overflow-hidden">
@@ -185,7 +210,7 @@ onMounted(() => {
         <div class="space-y-4">
           <div>
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-text2">忠实度</span>
+              <span class="text-xs text-text2">答案忠实度</span>
               <span class="text-sm font-semibold text-accent">{{ ragasMetrics.generation.faithfulness }}%</span>
             </div>
             <div class="w-full bg-surface2 rounded-full h-2 overflow-hidden">
@@ -198,7 +223,7 @@ onMounted(() => {
           </div>
           <div>
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-text2">相关性</span>
+              <span class="text-xs text-text2">答案相关性</span>
               <span class="text-sm font-semibold text-accent">{{ ragasMetrics.generation.relevance }}%</span>
             </div>
             <div class="w-full bg-surface2 rounded-full h-2 overflow-hidden">
@@ -211,7 +236,7 @@ onMounted(() => {
           </div>
           <div>
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-text2">完整性</span>
+              <span class="text-xs text-text2">答案完整性</span>
               <span class="text-sm font-semibold text-accent">{{ ragasMetrics.generation.completeness }}%</span>
             </div>
             <div class="w-full bg-surface2 rounded-full h-2 overflow-hidden">
@@ -234,17 +259,17 @@ onMounted(() => {
         <div class="space-y-4">
           <div>
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-text2">平均响应</span>
+              <span class="text-xs text-text2">平均响应时间</span>
               <span class="text-sm font-semibold text-accent">{{ ragasMetrics.performance.avg_response_ms }}ms</span>
             </div>
             <div class="text-xs text-muted">越低越好</div>
           </div>
           <div>
             <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-text2">P95 响应</span>
+              <span class="text-xs text-text2">P95 响应时间</span>
               <span class="text-sm font-semibold text-accent">{{ ragasMetrics.performance.p95_response_ms }}ms</span>
             </div>
-            <div class="text-xs text-muted">95% 请求</div>
+            <div class="text-xs text-muted">95% 请求在此时间内完成</div>
           </div>
           <div>
             <div class="flex justify-between items-center mb-1">
@@ -264,8 +289,8 @@ onMounted(() => {
         <div class="text-xs text-muted mt-1">已入库文档</div>
       </div>
       <div class="bg-white border border-border rounded-lg p-5 text-center">
-        <div class="text-3xl font-bold text-accent">{{ health.database?.response_time || '—' }}<span class="text-base">ms</span></div>
-        <div class="text-xs text-muted mt-1">数据库响应</div>
+        <div class="text-3xl font-bold text-accent">{{ health.avg_response_ms || '—' }}<span class="text-base">ms</span></div>
+        <div class="text-xs text-muted mt-1">平均响应</div>
       </div>
       <div class="bg-white border border-border rounded-lg p-5 text-center">
         <div class="text-2xl font-bold" :class="health.status === 'ok' ? 'text-green' : 'text-red'">
@@ -286,7 +311,7 @@ onMounted(() => {
             <tr class="bg-surface2 border-b border-border">
               <th class="px-4 py-3 text-left font-semibold text-text2">文件名</th>
               <th class="px-4 py-3 text-left font-semibold text-text2">状态</th>
-              <th class="px-4 py-3 text-left font-semibold text-text2">分块数</th>
+              <th class="px-4 py-3 text-left font-semibold text-text2">页数</th>
               <th class="px-4 py-3 text-left font-semibold text-text2">File ID</th>
             </tr>
           </thead>
@@ -307,7 +332,7 @@ onMounted(() => {
                   {{ file.status }}
                 </span>
               </td>
-              <td class="px-4 py-3 text-text">{{ file.chunk_count }}</td>
+              <td class="px-4 py-3 text-text">{{ file.page_count }}</td>
               <td class="px-4 py-3 text-text2 font-mono text-xs">{{ file.file_id }}</td>
             </tr>
             <tr v-if="files.length === 0">

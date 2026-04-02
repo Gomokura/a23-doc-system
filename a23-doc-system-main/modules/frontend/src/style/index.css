@@ -1,0 +1,66 @@
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  @apply box-border;
+}
+
+html, body {
+  @apply bg-bg m-0 p-0;
+  font-family: 'Noto Sans SC', -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+#app {
+  @apply min-h-screen;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-border rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-text2;
+}
+
+.el-message {
+  @apply font-sans;
+}
+
+.el-input__wrapper {
+  @apply bg-white border border-border rounded-md;
+}
+
+.el-input__inner {
+  @apply text-text;
+}
+
+.el-textarea__inner {
+  @apply bg-white border border-border rounded-md text-text;
+}
+
+.el-select-dropdown {
+  @apply bg-white border border-border rounded-md;
+}
+
+.el-option {
+  @apply text-text;
+}
+
+.el-option:hover {
+  @apply bg-surface2;
+}
+
+.el-option.selected {
+  @apply bg-accent-bg text-accent;
+}
