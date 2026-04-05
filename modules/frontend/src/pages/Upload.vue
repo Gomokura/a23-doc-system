@@ -248,7 +248,34 @@ const handleReParse = async (record: UploadHistory) => {
   }
 }
 
-onMounted(loadHistory)
+const batchParsing = ref(false)
+const batchResult = ref<string>('')
+
+const handleBatchParse = async () => {
+  batchParsing.value = true
+  batchResult.value = ''
+  try {
+    const res = await fetch('/api/parse/batch', { method: 'POST' })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.detail || '批量解析失败')
+    const submitted = data.tasks?.filter((t: any) => t.status === 'submitted').length || 0
+    batchResult.value = data.message || `已提交 ${submitted} 个解析任务`
+    ElMessage.success(batchResult.value)
+    // 每2秒刷新一次历史记录，直到没有 uploaded 状态
+    let checks = 0
+    const interval = setInterval(async () => {
+      await loadHistory()
+      checks++
+      const stillPending = uploadHistory.value.some(f => f.status === 'uploaded')
+      if (!stillPending || checks > 30) clearInterval(interval)
+    }, 2000)
+  } catch (e: any) {
+    ElMessage.error(e.message || '批量解析失败')
+  } finally {
+    batchParsing.value = false
+  }
+}
+
 </script>
 
 <template>
@@ -361,12 +388,21 @@ onMounted(loadHistory)
         <div class="text-xs font-bold tracking-widest text-muted uppercase">
           上传历史
         </div>
-        <button
-          @click="loadHistory"
-          class="text-xs text-accent hover:text-blue-600"
-        >
-          刷新
-        </button>
+        <div class="flex items-center gap-3">
+          <button
+            @click="handleBatchParse"
+            :disabled="batchParsing || !uploadHistory.some(f => f.status === 'uploaded')"
+            class="text-xs px-3 py-1 bg-accent text-white rounded hover:bg-blue-600 disabled:opacity-40 font-medium transition-colors"
+          >
+            {{ batchParsing ? '解析中...' : '一键解析全部' }}
+          </button>
+          <button
+            @click="loadHistory"
+            class="text-xs text-accent hover:text-blue-600"
+          >
+            刷新
+          </button>
+        </div>
       </div>
       <div class="bg-white border border-border rounded-lg overflow-hidden">
         <table class="w-full text-sm">

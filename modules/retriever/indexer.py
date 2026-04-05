@@ -6,15 +6,61 @@ import os
 import pickle
 from typing import Optional, List, Set, Dict
 
+import numpy as np
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 from loguru import logger
-from sentence_transformers import SentenceTransformer
 
 from config import settings
 
+# ═══════════════════════════════════════════════════════════════════════
+# 硅基流动云端 Embedding（替代本地 SentenceTransformer，接口完全兼容）
+# ═══════════════════════════════════════════════════════════════════════
+class SiliconFlowEmbedder:
+    """
+    调用硅基流动 Embedding API，接口与 SentenceTransformer 保持兼容。
+    使用相同模型（bge-small-zh-v1.5），向量维度不变，现有 ChromaDB 数据无需重建。
+    """
+    _API_BATCH = 32  # 硅基流动单次最多接受 32 条
+
+    def __init__(self):
+        from openai import OpenAI
+        self._client = OpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
+        )
+        self._model = settings.embed_model  # BAAI/bge-small-zh-v1.5
+
+    def encode(self, sentences, normalize_embeddings: bool = False,
+               convert_to_numpy: bool = True, batch_size: int = None):
+        single = isinstance(sentences, str)
+        if single:
+            sentences = [sentences]
+
+        all_vecs: list = []
+        step = batch_size or self._API_BATCH
+        for i in range(0, len(sentences), step):
+            batch = sentences[i: i + step]
+            resp = self._client.embeddings.create(
+                model=self._model,
+                input=batch,
+                encoding_format="float",
+            )
+            all_vecs.extend(item.embedding for item in resp.data)
+
+        arr = np.array(all_vecs, dtype=np.float32)
+
+        if normalize_embeddings:
+            norms = np.linalg.norm(arr, axis=1, keepdims=True)
+            norms = np.where(norms == 0, 1.0, norms)
+            arr = arr / norms
+
+        # 单条输入返回 1D 数组，与 SentenceTransformer 行为一致
+        return arr[0] if single else arr
+
+
 # 全局变量（模块级缓存）
-_embed_model: Optional[SentenceTransformer] = None
+_embed_model: Optional[SiliconFlowEmbedder] = None
 _chroma_client: Optional[chromadb.PersistentClient] = None
 
 # 兼容旧逻辑保留
@@ -40,12 +86,12 @@ def get_tokenized_corpus_pkl() -> List[list]:
 BATCH_SIZE = 32  # 批量编码大小，可根据内存调整
 
 
-def _get_embed_model() -> SentenceTransformer:
-    """获取或初始化嵌入模型（单例模式）"""
+def _get_embed_model() -> SiliconFlowEmbedder:
+    """获取或初始化云端 Embedding 客户端（单例模式）"""
     global _embed_model
     if _embed_model is None:
-        logger.info(f"加载嵌入模型: {settings.embed_model}")
-        _embed_model = SentenceTransformer(settings.embed_model)
+        logger.info(f"初始化硅基流动 Embedding: model={settings.embed_model}")
+        _embed_model = SiliconFlowEmbedder()
     return _embed_model
 
 

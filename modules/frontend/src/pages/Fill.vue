@@ -218,26 +218,28 @@ async function handleExtractAll() {
     item.status = 'extracting'
 
     try {
-      // 用 RAG 问答从选中的文档中提取该字段的值
+      // 用 extract 场景专门做字段值提取，LLM 只返回纯值
       const askRes = await fetch('/api/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          query: `请从文档内容中提取"${item.field}"对应的具体数值或文字，不要编造，只返回提取到的值`,
+          query: `从文档中提取"${item.field}"的值，只输出值本身`,
           file_ids: sourceFileIds.value,
-          scenario: 'default'
+          scenario: 'extract'
         })
       })
       const askData = await askRes.json()
 
       if (askRes.ok && askData.answer) {
+        // extract 场景下 LLM 直接返回纯值，只做基本清理
         const raw = askData.answer
-          .replace(/^[#*_\-\d.、，,。\s]+/g, '')   // 去掉行首编号/符号
-          .replace(/[#*\n]/g, '')
+          .replace(/^(回答|值|答案|提取结果)[：:]\s*/g, '')  // 防止 LLM 仍然加前缀
+          .replace(/\n来源[：:][\s\S]*/g, '')                 // 去掉来源行
+          .replace(/\[文档\d+\]/g, '')                        // 去掉文档引用标记
           .trim()
-          .slice(0, 200)                            // 截断过长回答
+          .slice(0, 200)
 
-        if (raw && raw !== '(无)' && raw !== '未知') {
+        if (raw && raw !== '(无)' && raw !== '未知' && raw !== '根据提供的信息无法回答该问题') {
           item.value = raw
           item.confidence = Math.round((askData.confidence || 0.6) * 100)
           item.sourceChunk = askData.sources?.[0]?.content?.slice(0, 60) || ''
@@ -263,6 +265,47 @@ async function handleExtractAll() {
   step.value = 'fill'
   const ok = fieldList.value.filter(f => f.status === 'success').length
   ElMessage.success(`提取完成：${ok}/${fieldList.value.length} 个字段成功`)
+}
+
+// ── 智能回填（直接用 source_file_ids，让 LLM 自动填表） ──
+async function handleSmartFill() {
+  if (!templateFileId.value) {
+    ElMessage.warning('缺少模板文件 ID')
+    return
+  }
+  if (sourceFileIds.value.length === 0) {
+    ElMessage.warning('请至少选择一个数据来源文档')
+    return
+  }
+
+  loading.value = true
+  step.value = 'fill'
+  errorMsg.value = ''
+
+  try {
+    const res = await fetch('/api/fill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        template_file_id: templateFileId.value,
+        source_file_ids: sourceFileIds.value,
+        max_rows: 10,
+      })
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.detail || '智能回填失败')
+
+    outputFileId.value = data.output_file_id
+    downloadUrl.value = data.download_url
+    step.value = 'done'
+    progress.value.done = true
+    ElMessage.success('智能回填成功！可下载文档')
+  } catch (e: any) {
+    errorMsg.value = e.message
+    ElMessage.error('回填失败：' + e.message)
+  } finally {
+    loading.value = false
+  }
 }
 
 // ── 执行回填 ────────────────────────────────────────────────
@@ -311,7 +354,11 @@ async function handleFill() {
 // ── 下载 ─────────────────────────────────────────────────────
 function handleDownload() {
   if (downloadUrl.value) {
-    window.open(downloadUrl.value, '_blank')
+    // downloadUrl 形如 /download/{id}，加 /api 前缀走 Vite 代理转发到后端
+    const url = downloadUrl.value.startsWith('/api')
+      ? downloadUrl.value
+      : '/api' + downloadUrl.value
+    window.open(url, '_blank')
   }
 }
 
@@ -492,13 +539,22 @@ function handleReset() {
     </div>
 
     <!-- ── ③ 提取 & 回填按钮 ── -->
-    <div v-if="fieldList.length > 0" class="flex gap-3">
+    <div v-if="fieldList.length > 0" class="flex gap-3 flex-wrap">
       <button
         @click="handleExtractAll"
         :disabled="loading || sourceFileIds.length === 0"
         class="px-5 py-2.5 bg-accent text-white font-medium rounded-md hover:bg-blue-600 disabled:opacity-40 transition-colors"
       >
         {{ loading ? '⏳ 提取中...' : '🔍 从文档中提取全部字段值' }}
+      </button>
+
+      <button
+        @click="handleSmartFill"
+        :disabled="loading || sourceFileIds.length === 0"
+        class="px-5 py-2.5 bg-purple-600 text-white font-medium rounded-md hover:bg-purple-700 disabled:opacity-40 transition-colors"
+        title="LLM 自动读取模板表头并从数据源提取数据，无需逐字段提取"
+      >
+        {{ loading ? '⏳ 智能回填中...' : '🤖 智能回填（推荐）' }}
       </button>
 
       <button

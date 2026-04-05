@@ -137,10 +137,52 @@ def rerank_chunks(query: str, chunks: list, top_k: int = None) -> list:
 
 
 def _build_prompt(query: str, chunks: list, scenario: str = "default") -> str:
-    context = "\n\n".join([
-        f"[文档{i + 1}]\n{c['content']}"
-        for i, c in enumerate(chunks)
-    ])
+    CHUNK_MAX_CHARS = 3000
+    CONTEXT_MAX_CHARS = 8000
+
+    parts = []
+    total = 0
+    seen_files = []
+
+    for i, c in enumerate(chunks):
+        content = (c.get("content") or "").strip()
+        if not content:
+            continue
+        if len(content) > CHUNK_MAX_CHARS:
+            content = content[:CHUNK_MAX_CHARS] + "…"
+
+        # 用真实文件名作标签，而不是 [文档N]
+        source_file = c.get("source_file", "")
+        filename = c.get("filename") or source_file.replace("\\", "/").split("/")[-1] or f"文档{i+1}"
+        if filename not in seen_files:
+            seen_files.append(filename)
+
+        seg = f"【{filename}】\n{content}"
+        if total + len(seg) + 2 > CONTEXT_MAX_CHARS:
+            break
+        parts.append(seg)
+        total += len(seg) + 2
+
+    context = "\n\n".join(parts)
+    # 来源列表用真实文件名
+    source_names = "、".join(f"【{fn}】" for fn in seen_files) if seen_files else "未知文件"
+
+    if scenario == "extract":
+        return f"""你是一个文档字段提取助手。请从以下文档内容中提取指定字段的值。
+
+## 文档内容
+{context}
+
+## 提取任务
+{query}
+
+## 严格要求
+1. 只输出提取到的具体值，不要任何解释、前缀或来源说明
+2. 如果文档中确实没有该字段的值，只输出：(无)
+3. 不要输出"回答:"、"值:"、"来源:"等前缀
+4. 不要编造，只从文档中提取
+
+直接输出值："""
 
     scenario_prompts = {
         "contract": "5. 如果涉及合同条款，请重点识别：合同金额、甲乙双方、付款方式、违约责任、有效期。",
@@ -161,12 +203,12 @@ def _build_prompt(query: str, chunks: list, scenario: str = "default") -> str:
 1. 基于参考文档内容回答，不要编造信息
 2. 如果文档中没有相关内容，请明确说明"根据提供的信息无法回答该问题"
 3. 回答要准确、简洁、有条理
-4. 在回答中引用相关文档来源
+4. 【聚合/统计类问题】如果用户问"有哪些"、"有几个"、"列出所有"等，请归纳去重后汇总作答
 {extra_requirement}
 
 ## 回答格式
 回答: <你的回答>
-来源: <列出参考的文档编号，如 [文档1]、[文档2]>"""
+来源: {source_names}"""
 
 
 def detect_conflicts(chunks: list) -> list:
@@ -304,6 +346,78 @@ def mmr_diversity_rerank(query: str, chunks: list, lambda_val: float = None) -> 
         return chunks
 
 
+def _load_file_as_chunks(file_paths: list, file_name_map: dict = None) -> list:
+    """
+    直接读取源文件，把内容合并成少量 chunk 传给 LLM。
+    Excel/CSV：按分类列去重后，所有行合并为 1~2 个大 chunk（CSV 格式），不拆分成每行一个 chunk。
+    其他文件：按段落切分，限制数量。
+    file_name_map: {磁盘路径: 真实文件名}，优先用真实文件名展示
+    """
+    chunks = []
+    max_chunks = getattr(settings, "top_k", 10)  # 总 chunk 数不超过 TOP_K
+
+    for fp in file_paths:
+        # 优先使用数据库中的真实文件名，避免显示 UUID 磁盘名
+        disk_name = fp.replace("\\", "/").split("/")[-1]
+        filename = (file_name_map or {}).get(fp, disk_name)
+        ext = fp.rsplit(".", 1)[-1].lower()
+        try:
+            if ext in ("xlsx", "xls"):
+                import pandas as pd
+                df = pd.read_excel(fp)
+            elif ext == "csv":
+                import pandas as pd
+                df = pd.read_csv(fp)
+            else:
+                with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+                for i, para in enumerate(text.split("\n\n")):
+                    para = para.strip()
+                    if para and len(chunks) < max_chunks:
+                        chunks.append({"chunk_id": f"file_{i}", "content": para,
+                                       "source_file": fp, "page": i,
+                                       "hybrid_score": 1.0, "filename": filename})
+                continue
+
+            if df.empty:
+                continue
+
+            # 找分类列去重
+            dedup_col = None
+            for col in df.columns:
+                nunique = df[col].nunique()
+                if 1 < nunique < min(200, len(df) * 0.3):
+                    dedup_col = col
+                    break
+
+            sample_df = (df.drop_duplicates(subset=[dedup_col])
+                         if dedup_col else df.sample(n=min(50, len(df)), random_state=42))
+
+            # 把所有行合并成 CSV 格式的单个 chunk，而不是每行一个 chunk
+            # 这样 LLM 看到的是完整的表格，来源只有 1 个文件
+            csv_text = sample_df.to_csv(index=False)
+            # 若内容太长则切成 2 个 chunk
+            chunk_size = 3000
+            for ci, start in enumerate(range(0, len(csv_text), chunk_size)):
+                piece = csv_text[start:start + chunk_size]
+                chunks.append({
+                    "chunk_id": f"{filename}_{ci}",
+                    "content": piece,
+                    "source_file": fp,
+                    "page": ci,
+                    "hybrid_score": 1.0,
+                    "filename": filename,
+                })
+                if len(chunks) >= max_chunks:
+                    break
+
+            logger.info(f"直接读取文件 {filename}：{len(sample_df)} 行，生成 chunk 数: {len(chunks)}")
+        except Exception as e:
+            logger.warning(f"直接读取文件 {fp} 失败: {e}")
+
+    return chunks
+
+
 def distance_to_score(distance: float, method: str = "exp") -> float:
     if distance is None or distance < 0:
         return 0.0
@@ -389,13 +503,13 @@ def _ensure_bm25_ready(file_ids: list = None):
     corpus = [r["content"] for r in records]
     _BM25_CORPUS = corpus
 
-    # 尝试从持久化文件加载
+    # 尝试从持久化文件加载（文件名含记录数，记录数变化时自动失效）
     method = getattr(settings, "bm25s_method", "robertson")
-    index_file = f"{_BM25S_INDEX_PATH}_{cache_key}.pt"
+    index_file = f"{_BM25S_INDEX_PATH}_{cache_key}_n{len(records)}.pt"
     corpus_file = f"{_BM25S_INDEX_PATH}_{cache_key}_corpus.json"
 
-    import os
-    if os.path.exists(index_file) and os.path.exists(corpus_file):
+    import os, glob
+    if os.path.exists(index_file):
         try:
             _BM25_INDEX = bm25s.BM25.load(index_file, load_corpus=True)
             _BM25_CACHE_VALID = True
@@ -410,9 +524,14 @@ def _ensure_bm25_ready(file_ids: list = None):
     _BM25_INDEX = bm25s.BM25(method=method)
     _BM25_INDEX.index(corpus_tokens)
 
-    # 持久化保存
+    # 持久化保存（先删同 cache_key 的旧文件）
     try:
-        os.makedirs(os.path.dirname(index_file), exist_ok=True)
+        for old in glob.glob(f"{_BM25S_INDEX_PATH}_{cache_key}_n*.pt"):
+            try:
+                os.remove(old)
+            except Exception:
+                pass
+        os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
         _BM25_INDEX.save(index_file)
         logger.info(f"BM25S 持久化已保存: {index_file}")
     except Exception as e:
@@ -495,14 +614,25 @@ def reciprocal_rank_fusion(results_list: list, k: int = 60) -> dict:
     return dict(sorted_chunk_ids)
 
 
-def _hybrid_retrieve(query: str, file_ids: list) -> list:
+def _hybrid_retrieve(query: str, file_ids: list, file_paths: list = None, file_name_map: dict = None) -> list:
     """
-    真正的混合检索：
-    1. 向量检索召回候选
-    2. BM25 检索召回候选
-    3. 取并集后统一计算 hybrid_score
-    4. rerank 后返回 top chunks
+    混合检索：
+    - 若提供 file_paths 且文件为结构化表格（Excel/CSV），直接读文件取多样性样本，跳过向量检索
+    - 否则走向量+BM25混合检索
     """
+    # 判断是否有结构化文件可直接读取
+    structured_exts = {"xlsx", "xls", "csv"}
+    if file_paths:
+        structured = [fp for fp in file_paths if fp.rsplit(".", 1)[-1].lower() in structured_exts]
+        if structured:
+            logger.info(f"检测到结构化文件，直接读取跳过向量检索: {structured}")
+            direct_chunks = _load_file_as_chunks(structured, file_name_map=file_name_map)
+            # 非结构化文件仍走向量检索
+            other = [fp for fp in file_paths if fp not in structured]
+            if other:
+                pass  # 暂不处理混合情况
+            if direct_chunks:
+                return direct_chunks
     model = _get_embed_model()
     query_embedding = model.encode(query).tolist()
 
@@ -608,6 +738,16 @@ def _hybrid_retrieve(query: str, file_ids: list) -> list:
     top_chunks = rerank_chunks(query, top_chunks, top_k=settings.top_k)
     top_chunks = mmr_diversity_rerank(query, top_chunks)
 
+    # 向量/BM25 路径：用 file_name_map 把 UUID basename 替换成真实文件名
+    if file_name_map:
+        for c in top_chunks:
+            if not c.get("filename"):
+                src = c.get("source_file", "")
+                # source_file 可能是 basename 或完整路径，两种都查
+                real = file_name_map.get(src) or file_name_map.get(src.replace("\\", "/").split("/")[-1])
+                if real:
+                    c["filename"] = real
+
     logger.info(
         f"混合检索完成: vector={len(vector_chunks)}, bm25={len(bm25_scores_map)}, "
         f"merged={len(candidates)}, deduped={len(deduped)}, top={len(top_chunks)}"
@@ -615,9 +755,12 @@ def _hybrid_retrieve(query: str, file_ids: list) -> list:
     return top_chunks
 
 
-def retrieve_and_answer(query: str, file_ids: list, scenario: str = "default") -> dict:
+def retrieve_and_answer(query: str, file_ids: list, file_paths: list = None,
+                        scenario: str = "default", file_name_map: dict = None) -> dict:
     """
     混合检索（向量+BM25）→ 重排序 → 冲突检测 → 融合 → 调LLM生成答案
+    file_paths: 由 API 层从 DB 查出，结构化文件直接读取，无需向量检索
+    file_name_map: {磁盘路径: 真实文件名}，用于在来源中显示可读文件名
     """
     logger.info(f"收到问答请求: query={query}, file_ids={file_ids}")
 
@@ -633,7 +776,7 @@ def retrieve_and_answer(query: str, file_ids: list, scenario: str = "default") -
 
     try:
         start_time = time.time()
-        top_chunks = _hybrid_retrieve(query, file_ids)
+        top_chunks = _hybrid_retrieve(query, file_ids, file_paths=file_paths, file_name_map=file_name_map)
         elapsed = time.time() - start_time
         logger.info(f"检索完成，耗时: {elapsed:.2f}s, top_chunks={len(top_chunks)}")
 
@@ -668,8 +811,8 @@ def retrieve_and_answer(query: str, file_ids: list, scenario: str = "default") -
         response = llm_client.chat.completions.create(
             model=settings.llm_model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=500
+            temperature=0,
+            max_tokens=1500
         )
 
         answer = (response.choices[0].message.content or "").strip()
@@ -683,7 +826,7 @@ def retrieve_and_answer(query: str, file_ids: list, scenario: str = "default") -
             {
                 "chunk_id": c["chunk_id"],
                 "content": c["content"],
-                "source_file": c["source_file"],
+                "source_file": c.get("filename") or c["source_file"],  # 优先用真实文件名
                 "page": c["page"]
             }
             for c in top_chunks

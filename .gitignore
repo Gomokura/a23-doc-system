@@ -33,6 +33,7 @@ db/chroma/
 db/*.db
 db/*.db-journal
 db/bm25s_index_*.pt
+db/bm25s_index_*/
 db/chroma.sqlite
 *.sqlite
 *.sqlite3

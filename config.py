@@ -11,18 +11,18 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class Settings(BaseSettings):
     # LLM 配置（使用硅基流动云端 API）
-    llm_api_key:  str = "sk-dusgfnudzpdcfgpyvcldfggvjpuhzquehixfupteskjcyvbd"
+    llm_api_key:  str = ""  # 请在 .env 中配置 LLM_API_KEY，禁止在此硬编码
     llm_base_url: str = "https://api.siliconflow.cn/v1"
     llm_model:    str = "Qwen/Qwen2.5-7B-Instruct"
 
     # 👇 -------- 新增：VLM 视觉大模型配置 (专供 PDF 图片解析) -------- 👇
-    vlm_api_key: str = "填入你的云端视觉大模型API_KEY"  # 建议用硅基流动等免费/廉价的云端 API
+    vlm_api_key: str = ""  # 请在 .env 中配置 VLM_API_KEY，禁止在此硬编码
     vlm_base_url: str = "https://api.siliconflow.cn/v1"
     vlm_model: str = "Qwen/Qwen2-VL-72B-Instruct"  # 强大的视觉模型
     # 👆 ----------------------------------------------------------- 👆
 
-    # 嵌入模型（本地运行，Kaggle 可用）
-    embed_model: str = "BAAI/bge-small-zh-v1.5"
+    # 嵌入模型（硅基流动云端 API）
+    embed_model: str = "BAAI/bge-m3"
 
     # 数据库路径（自动转为绝对路径，解决从任意目录启动找不到数据库的问题）
     @property
@@ -95,7 +95,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     model_config = {
-        "env_file": ".env",
+        "env_file": os.path.join(BASE_DIR, ".env"),
         "env_file_encoding": "utf-8",
         "extra": "ignore",  # 允许 .env 中有多余的字段
     }

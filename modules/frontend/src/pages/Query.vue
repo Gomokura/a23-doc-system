@@ -10,10 +10,19 @@ interface Evidence {
   confidence: number
 }
 
+interface ConflictDetail {
+  description?: string
+  field?: string
+  values?: string[]
+}
+
 interface QueryResult {
   answer: string
   confidence: number
   sources: Evidence[]
+  hasConflicts: boolean
+  conflictCount: number
+  conflictDetails: ConflictDetail[]
   explanation: {
     why: string
     alternatives: string
@@ -38,17 +47,35 @@ const toggleSource = (index: number) => {
 }
 
 const getConfidenceColor = (confidence: number) => {
-  if (confidence >= 90) return 'text-green'
-  if (confidence >= 80) return 'text-accent'
-  if (confidence >= 70) return 'text-yellow-500'
+  if (confidence >= 70) return 'text-green'
+  if (confidence >= 50) return 'text-accent'
+  if (confidence >= 30) return 'text-yellow-500'
   return 'text-red'
 }
 
 const getRelevanceColor = (relevance: number) => {
-  if (relevance >= 90) return 'bg-green/10 text-green'
-  if (relevance >= 80) return 'bg-accent/10 text-accent'
-  if (relevance >= 70) return 'bg-yellow-500/10 text-yellow-600'
+  if (relevance >= 70) return 'bg-green/10 text-green'
+  if (relevance >= 50) return 'bg-accent/10 text-accent'
+  if (relevance >= 30) return 'bg-yellow-500/10 text-yellow-600'
   return 'bg-red/10 text-red'
+}
+
+// 关键词高亮
+const escapeHtml = (str: string): string =>
+  str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+const highlightContent = (content: string, queryText: string): string => {
+  if (!queryText || !content) return escapeHtml(content)
+  const words = queryText.trim().split(/\s+/).filter(w => w.length > 1)
+  let highlighted = escapeHtml(content)
+  for (const word of words) {
+    const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    highlighted = highlighted.replace(
+      new RegExp(escaped, 'gi'),
+      match => `<mark class="bg-yellow-200 rounded px-0.5">${match}</mark>`
+    )
+  }
+  return highlighted
 }
 
 const handleQuery = async () => {
@@ -77,27 +104,43 @@ const handleQuery = async () => {
 
     const data = await response.json()
 
-    // 将 API 返回格式映射为前端 QueryResult 格式
+    const seenFiles = new Set<string>()
+    const uniqueSources = (data.sources || []).filter((s: any) => {
+      const fn = extractFilename(s.source_file || s.filename || '')
+      if (seenFiles.has(fn)) return false
+      seenFiles.add(fn)
+      return true
+    })
+
+    const confidence = typeof data.confidence === 'number' && data.confidence >= 0
+      ? Math.round(data.confidence * 100)
+      : 0
+
+    const hasConflicts = data.fusion?.has_conflicts || false
+    const conflictCount = data.fusion?.conflict_count || 0
+    const conflictDetails = data.fusion?.conflict_details || []
+
     result.value = {
       answer: data.answer || '无法生成答案',
-      confidence: typeof data.confidence === 'number' && data.confidence >= 0
-        ? Math.round(data.confidence * 100)
-        : 0,
-      sources: (data.sources || []).map((s: any, idx: number) => ({
-        filename: s.source_file || s.filename || '未知文件',
+      confidence,
+      hasConflicts,
+      conflictCount,
+      conflictDetails,
+      sources: uniqueSources.map((s: any) => ({
+        filename: extractFilename(s.source_file || s.filename || ''),
         page: s.page || 0,
         content: s.content || '',
         relevance: s.relevance || s.score ? Math.round((s.relevance || s.score) * 100) : 80,
         confidence: s.confidence || s.score ? Math.round((s.confidence || s.score) * 100) : 80,
       })),
       explanation: {
-        why: data.fusion?.has_conflicts
-          ? `检测到 ${data.fusion.conflict_count} 处信息冲突，系统已融合多源信息给出答案`
+        why: hasConflicts
+          ? `检测到 ${conflictCount} 处信息冲突，系统已融合多源信息给出答案`
           : '基于检索到的文档片段生成答案，相关度高',
-        alternatives: data.fusion?.has_conflicts
-          ? (data.fusion.conflict_details || []).map((c: any) => c.description).join('；')
+        alternatives: hasConflicts
+          ? conflictDetails.map((c: any) => c.description || c.field).filter(Boolean).join('；') || '存在多源冲突'
           : '未发现明显冲突信息',
-        credibility: data.confidence && data.confidence >= 0.7
+        credibility: confidence >= 70
           ? '答案置信度高，来源可靠'
           : '答案仅供参考，建议进一步核实',
       },
@@ -114,17 +157,28 @@ const handleRefresh = async () => {
   try {
     const response = await fetch('/api/files')
     const data = await response.json()
-    filesList.value = data.files || []
-    fileIds.value = (data.files || [])
-      .filter((f: any) => f.status === 'indexed')
-      .map((f: any) => f.file_id)
-  } catch (error) {
+    filesList.value = (data.files || []).filter((f: any) => f.status === 'indexed')
+  } catch {
     ElMessage.error('刷新文件列表失败')
   }
 }
 
-// 页面打开时自动加载一次文档列表
-onMounted(handleRefresh)
+const toggleFile = (fileId: string) => {
+  const idx = fileIds.value.indexOf(fileId)
+  if (idx === -1) fileIds.value.push(fileId)
+  else fileIds.value.splice(idx, 1)
+}
+
+const extractFilename = (path: string) => {
+  if (!path) return '未知文件'
+  return path.replace(/\\/g, '/').split('/').pop() || path
+}
+
+// 页面打开时加载，之后每10秒自动刷新文件列表
+onMounted(() => {
+  handleRefresh()
+  setInterval(handleRefresh, 10000)
+})
 </script>
 
 <template>
@@ -145,28 +199,32 @@ onMounted(handleRefresh)
       </div>
 
       <div class="col-span-4">
-        <label class="block text-sm font-medium text-text2 mb-2">限定文档（留空则全库检索）</label>
-        <div class="space-y-2">
-          <select
-            v-model="fileIds"
-            multiple
-            class="w-full px-3 py-2 bg-white border border-border rounded-md text-sm text-text focus:border-accent focus:outline-none"
+        <div class="flex items-center justify-between mb-2">
+          <label class="block text-sm font-medium text-text2">限定文档（留空则全库检索）</label>
+          <button @click="handleRefresh" class="text-xs text-accent hover:underline">刷新</button>
+        </div>
+        <div class="bg-white border border-border rounded-md divide-y divide-border max-h-32 overflow-y-auto">
+          <div v-if="filesList.length === 0" class="px-3 py-2 text-xs text-muted">暂无已索引文档</div>
+          <label
+            v-for="f in filesList"
+            :key="f.file_id"
+            class="flex items-center gap-2 px-3 py-2 text-xs cursor-pointer hover:bg-surface2 transition-colors"
+            :class="fileIds.includes(f.file_id) ? 'bg-accent/5' : ''"
           >
-            <option value="">选择文档（可多选）...</option>
-            <option
-              v-for="f in filesList"
-              :key="f.file_id"
+            <input
+              type="checkbox"
               :value="f.file_id"
-            >
-              {{ f.filename }} ({{ f.status }})
-            </option>
-          </select>
-          <button
-            @click="handleRefresh"
-            class="w-full px-3 py-1.5 bg-surface text-text2 text-sm font-medium rounded-md border border-border hover:bg-surface2 transition-colors"
-          >
-            刷新列表
-          </button>
+              :checked="fileIds.includes(f.file_id)"
+              @change="toggleFile(f.file_id)"
+              class="accent-accent w-3.5 h-3.5 flex-shrink-0"
+            />
+            <span class="truncate" :class="fileIds.includes(f.file_id) ? 'text-accent font-medium' : 'text-text'">
+              {{ f.filename }}
+            </span>
+          </label>
+        </div>
+        <div class="mt-1 text-xs text-muted">
+          已选 {{ fileIds.length }} / {{ filesList.length }} 个文档
         </div>
       </div>
 
@@ -183,6 +241,23 @@ onMounted(handleRefresh)
 
     <!-- 查询结果 -->
     <div v-if="result" class="space-y-6">
+
+      <!-- 冲突警告横幅 -->
+      <div
+        v-if="result.hasConflicts"
+        class="bg-yellow-50 border border-yellow-300 rounded-lg p-4 flex items-start gap-3"
+      >
+        <span class="text-xl flex-shrink-0">⚠️</span>
+        <div>
+          <div class="text-sm font-bold text-yellow-800 mb-1">
+            多源信息冲突（{{ result.conflictCount }} 处）
+          </div>
+          <div class="text-xs text-yellow-700">
+            {{ result.conflictDetails.map((c: any) => c.description || c.field).filter(Boolean).join('；') || '多个来源存在矛盾，建议人工核实' }}
+          </div>
+        </div>
+      </div>
+
       <!-- 答案卡片 -->
       <div class="bg-white border border-border rounded-lg p-6">
         <div class="flex items-start justify-between mb-4">
@@ -197,7 +272,7 @@ onMounted(handleRefresh)
             <div class="text-xs text-muted">置信度</div>
           </div>
         </div>
-        <div class="bg-surface2 rounded-lg p-4 text-sm text-text leading-relaxed">
+        <div class="bg-surface2 rounded-lg p-4 text-sm text-text leading-relaxed whitespace-pre-wrap">
           {{ result.answer }}
         </div>
       </div>
@@ -232,13 +307,14 @@ onMounted(handleRefresh)
               </div>
             </div>
 
-            <!-- 证据内容（展开时显示） -->
+            <!-- 证据内容（展开时显示，含关键词高亮） -->
             <div v-if="expandedSources.has(index)" class="border-t border-border-l bg-surface2 p-4 space-y-3">
               <div>
-                <div class="text-xs font-semibold text-text2 mb-2">原文内容</div>
-                <div class="bg-white border border-border rounded p-3 text-sm text-text leading-relaxed">
-                  "{{ source.content }}"
-                </div>
+                <div class="text-xs font-semibold text-text2 mb-2">原文内容（关键词已高亮）</div>
+                <div
+                  class="bg-white border border-border rounded p-3 text-sm text-text leading-relaxed"
+                  v-html="highlightContent(source.content, query)"
+                ></div>
               </div>
 
               <div class="grid grid-cols-3 gap-3">
@@ -251,20 +327,17 @@ onMounted(handleRefresh)
                   <div class="text-lg font-bold text-accent">{{ source.confidence }}%</div>
                 </div>
                 <div class="bg-white border border-border rounded p-3">
-                  <div class="text-xs text-muted mb-1">来源</div>
-                  <div class="text-sm font-medium text-text">{{ source.filename }}</div>
+                  <div class="text-xs text-muted mb-1">来源文件</div>
+                  <div class="text-sm font-medium text-text truncate" :title="source.filename">{{ source.filename }}</div>
                 </div>
               </div>
 
               <div class="flex gap-2">
-                <button class="flex-1 px-3 py-2 bg-accent/10 text-accent text-sm font-medium rounded hover:bg-accent/20 transition-colors">
-                  📋 复制
-                </button>
-                <button class="flex-1 px-3 py-2 bg-accent/10 text-accent text-sm font-medium rounded hover:bg-accent/20 transition-colors">
-                  ⬇️ 下载
-                </button>
-                <button class="flex-1 px-3 py-2 bg-accent/10 text-accent text-sm font-medium rounded hover:bg-accent/20 transition-colors">
-                  🔗 查看原文
+                <button
+                  @click="() => { navigator.clipboard.writeText(source.content); ElMessage.success('已复制') }"
+                  class="flex-1 px-3 py-2 bg-accent/10 text-accent text-sm font-medium rounded hover:bg-accent/20 transition-colors"
+                >
+                  📋 复制原文
                 </button>
               </div>
             </div>
@@ -284,10 +357,10 @@ onMounted(handleRefresh)
           </p>
         </div>
 
-        <div class="bg-white border border-border rounded-lg p-4">
+        <div class="bg-white border border-border rounded-lg p-4" :class="result.hasConflicts ? 'border-yellow-300 bg-yellow-50' : ''">
           <div class="flex items-center gap-2 mb-3">
-            <span class="text-lg">🔄</span>
-            <h4 class="text-sm font-bold text-text">还有其他可能吗？</h4>
+            <span class="text-lg">{{ result.hasConflicts ? '⚠️' : '🔄' }}</span>
+            <h4 class="text-sm font-bold text-text">{{ result.hasConflicts ? '冲突信息' : '还有其他可能吗？' }}</h4>
           </div>
           <p class="text-xs text-text2 leading-relaxed">
             {{ result.explanation.alternatives }}

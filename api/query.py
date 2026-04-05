@@ -18,13 +18,33 @@ from errors import AppError
 router = APIRouter(tags=["智能问答"])
 
 
+@router.post("/cache/clear")
+async def clear_cache():
+    """清除所有问答缓存（文件更新后调用）"""
+    from modules.cache.redis_client import invalidate_cache
+    count = invalidate_cache("*")
+    return {"cleared": count, "message": f"已清除 {count} 条缓存"}
+
+
 def _validate_file_ids(file_ids: list, db: Session):
+    """校验文件存在且已索引，返回 (file_paths, file_name_map)
+    file_name_map: {磁盘路径|basename: 真实文件名}
+      - 完整路径用于结构化文件直接读取时的映射
+      - basename 用于向量检索结果（ChromaDB metadata 只存 basename）
+    """
+    import os
+    file_paths = []
+    file_name_map = {}
     for fid in file_ids:
         record = db.query(FileRecord).filter_by(file_id=fid).first()
         if not record:
             raise AppError(404, "FILE_NOT_FOUND", f"文件 {fid} 不存在")
         if record.status != "indexed":
             raise AppError(409, "FILE_NOT_PARSED", f"文件 {fid} 尚未完成解析和索引，请先调用 /parse")
+        file_paths.append(record.file_path)
+        file_name_map[record.file_path] = record.filename           # 完整路径 → 真实名
+        file_name_map[os.path.basename(record.file_path)] = record.filename  # basename → 真实名
+    return file_paths, file_name_map
 
 
 @router.post("/ask")
@@ -40,11 +60,20 @@ async def ask(body: dict, db: Session = Depends(get_db)):
     file_ids = body.get("file_ids", [])
     scenario = body.get("scenario", "default")
 
+    file_paths = []
+    file_name_map = {}
     if file_ids:
-        _validate_file_ids(file_ids, db)
+        file_paths, file_name_map = _validate_file_ids(file_ids, db)
+    else:
+        # 全库检索：构建所有已索引文件的 name map，避免返回 UUID 文件名
+        import os
+        for record in db.query(FileRecord).filter_by(status="indexed").all():
+            file_name_map[record.file_path] = record.filename
+            file_name_map[os.path.basename(record.file_path)] = record.filename
 
     from modules.retriever.hybrid_retriever import retrieve_and_answer
-    result = retrieve_and_answer(query=query, file_ids=file_ids, scenario=scenario)
+    result = retrieve_and_answer(query=query, file_ids=file_ids, file_paths=file_paths,
+                                 scenario=scenario, file_name_map=file_name_map)
     return result
 
 
@@ -61,8 +90,16 @@ async def ask_stream(body: dict, db: Session = Depends(get_db)):
     file_ids = body.get("file_ids", [])
     scenario = body.get("scenario", "default")
 
+    file_paths = []
+    file_name_map = {}
     if file_ids:
-        _validate_file_ids(file_ids, db)
+        file_paths, file_name_map = _validate_file_ids(file_ids, db)
+    else:
+        # 全库检索：构建所有已索引文件的 name map
+        import os as _os
+        for _rec in db.query(FileRecord).filter_by(status="indexed").all():
+            file_name_map[_rec.file_path] = _rec.filename
+            file_name_map[_os.path.basename(_rec.file_path)] = _rec.filename
 
     def _sse(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -93,7 +130,7 @@ async def ask_stream(body: dict, db: Session = Depends(get_db)):
                 })
                 return
 
-            top_chunks = _hybrid_retrieve(query, file_ids)
+            top_chunks = _hybrid_retrieve(query, file_ids, file_paths=file_paths, file_name_map=file_name_map)
             yield _sse("retrieval_done", {"chunks_count": len(top_chunks), "cached": False})
 
             if not top_chunks:
@@ -124,8 +161,8 @@ async def ask_stream(body: dict, db: Session = Depends(get_db)):
             stream = llm_client.chat.completions.create(
                 model=settings.llm_model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=500,
+                temperature=0,
+                max_tokens=1500,
                 stream=True,
             )
 
@@ -145,7 +182,7 @@ async def ask_stream(body: dict, db: Session = Depends(get_db)):
                 {
                     "chunk_id": c["chunk_id"],
                     "content": c["content"],
-                    "source_file": c["source_file"],
+                    "source_file": c.get("filename") or c["source_file"],  # 优先用真实文件名
                     "page": c["page"]
                 }
                 for c in top_chunks

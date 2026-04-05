@@ -242,14 +242,17 @@ async def _run_parse(task_id: str, file_id: str, file_path: str):
  
         if not result or not result.get("chunks"):
             raise ValueError("解析结果为空，chunk 列表不能为空")
- 
-        _update_task(db, task_id, status="processing", progress=70)
- 
+
+        # 解析完成立即更新 50%，避免前端进度长时间停在 10% 不动
+        _update_task(db, task_id, status="processing", progress=50)
+
         # ── 调用成员3：建立检索索引 ──────────────────────────
         from modules.retriever.indexer import build_index
+        # 进入索引阶段前推进到 70%
+        _update_task(db, task_id, status="processing", progress=70)
         await asyncio.get_event_loop().run_in_executor(None, build_index, result)
         # ────────────────────────────────────────────────────
- 
+
         _update_task(db, task_id, status="processing", progress=90)
  
         # ── 更新文件状态 ──
@@ -283,7 +286,63 @@ def _update_task(db, task_id: str, status: str, progress: int = None, error_msg:
         db.commit()
 
 
-# ── POST /template/placeholders ─────────────────────────────────
+# ── POST /parse/batch ─────────────────────────────────────────
+@router.post("/parse/batch", summary="批量提交解析任务")
+async def parse_batch(db: Session = Depends(get_db)):
+    """
+    一键解析所有 status=uploaded 的文件。
+    返回每个文件的 task_id，前端可逐一轮询 /parse/status/{task_id}。
+    """
+    pending_files = db.query(FileRecord).filter_by(status="uploaded").all()
+    if not pending_files:
+        return {"message": "没有待解析的文件", "tasks": []}
+
+    tasks = []
+    for record in pending_files:
+        # 跳过已有进行中任务的文件
+        existing = (
+            db.query(TaskRecord)
+            .filter_by(file_id=record.file_id, task_type="parse")
+            .filter(TaskRecord.status.in_(["pending", "processing"]))
+            .first()
+        )
+        if existing:
+            tasks.append({
+                "file_id": record.file_id,
+                "filename": record.filename,
+                "task_id": existing.task_id,
+                "status": "already_running",
+            })
+            continue
+
+        task_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        task = TaskRecord(
+            task_id=task_id,
+            file_id=record.file_id,
+            task_type="parse",
+            status="pending",
+            progress=0,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(task)
+        db.commit()
+        asyncio.create_task(_run_parse(task_id, record.file_id, record.file_path))
+        tasks.append({
+            "file_id": record.file_id,
+            "filename": record.filename,
+            "task_id": task_id,
+            "status": "submitted",
+        })
+
+    return {
+        "message": f"已提交 {len([t for t in tasks if t['status']=='submitted'])} 个解析任务",
+        "tasks": tasks,
+    }
+
+
+
 @router.post("/template/placeholders", summary="解析模板占位符")
 async def extract_placeholders(body: dict, db: Session = Depends(get_db)):
     """

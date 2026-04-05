@@ -297,18 +297,30 @@ def parse_document(file_path: str, file_id: str) -> dict:
                         # 填充空值，避免出现 nan 影响大模型判断
                         df = df.fillna("")
                         headers = df.columns.tolist()
-                        # 把 Sheet 名称作为 Markdown 的二级标题
-                        md_lines = [f"## 表格工作簿：{sheet_name}\n"]
-                        # 拼装标准 Markdown 表头
-                        md_lines.append("| " + " | ".join([str(h).replace('\n', ' ') for h in headers]) + " |")
-                        md_lines.append("|" + "|".join(["---"] * len(headers)) + "|")
+                        header_row = "| " + " | ".join([str(h).replace('\n', ' ') for h in headers]) + " |"
+                        sep_row = "|" + "|".join(["---"] * len(headers)) + "|"
 
-                        # 拼装数据行
-                        for _, row in df.iterrows():
-                            row_data = [str(item).replace('\n', ' ').strip() for item in row]
-                            md_lines.append("| " + " | ".join(row_data) + " |")
-                        sheet_md = "\n".join(md_lines)
-                        chunks.extend(_chunk_text(sheet_md, file_id))
+                        # 按行数分块：每 50 行一个 chunk，每块都带表头，让 LLM 知道列含义
+                        ROWS_PER_CHUNK = 50
+                        total_rows = len(df)
+                        for start in range(0, total_rows, ROWS_PER_CHUNK):
+                            end = min(start + ROWS_PER_CHUNK, total_rows)
+                            block_lines = [
+                                f"## 表格工作簿：{sheet_name}（第{start+1}-{end}行，共{total_rows}行）\n",
+                                header_row,
+                                sep_row,
+                            ]
+                            for _, row in df.iloc[start:end].iterrows():
+                                row_data = [str(item).replace('\n', ' ').strip() for item in row]
+                                block_lines.append("| " + " | ".join(row_data) + " |")
+                            block_md = "\n".join(block_lines)
+                            chunks.append({
+                                "chunk_id": f"{file_id}_{len(chunks)}",
+                                "content": block_md,
+                                "page": 0,
+                                "chunk_type": "text",
+                                "metadata": {"sheet": sheet_name, "row_start": start, "row_end": end}
+                            })
 
                 if not chunks:
                     raise ValueError("常规引擎提取内容为空")
