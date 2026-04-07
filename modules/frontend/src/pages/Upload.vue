@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onActivated } from 'vue'
 import { ElMessage } from 'element-plus'
 
 interface UploadHistory {
@@ -275,6 +275,18 @@ const handleBatchParse = async () => {
     batchParsing.value = false
   }
 }
+
+// 首次进入时加载历史
+onMounted(() => {
+  loadHistory()
+})
+
+// keep-alive 切回此页时自动刷新历史（不打断正在进行的上传轮询）
+onActivated(() => {
+  if (!loading.value) {
+    loadHistory()
+  }
+})
 
 </script>
 

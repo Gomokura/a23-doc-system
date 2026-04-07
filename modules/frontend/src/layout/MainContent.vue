@@ -16,7 +16,9 @@ const pages = [Upload, Query, Fill, Status]
 <template>
   <main class="flex-1 bg-bg overflow-y-auto">
     <div class="p-6">
-      <component :is="pages[tab]" />
+      <keep-alive>
+        <component :is="pages[tab]" />
+      </keep-alive>
     </div>
   </main>
 </template>
