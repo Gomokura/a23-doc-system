@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     vlm_model: str = "Qwen/Qwen2-VL-72B-Instruct"  # 强大的视觉模型
     # 👆 ----------------------------------------------------------- 👆
 
-    # 嵌入模型（硅基流动云端 API）
-    embed_model: str = "BAAI/bge-m3"
+    # 嵌入模型（本地 Ollama，nomic-embed-text 是 Ollama 内置的优质 Embedding 模型）
+    embed_model: str = "nomic-embed-text"
 
     # 数据库路径（自动转为绝对路径，解决从任意目录启动找不到数据库的问题）
     @property

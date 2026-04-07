@@ -5,7 +5,7 @@
 
 import os
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Callable, Optional
 from loguru import logger
 from openai import OpenAI
 from config import settings
@@ -140,14 +140,17 @@ def _extract_entities_and_summary(chunks: List[Dict[str, Any]]) -> tuple[List[Di
         return [], "摘要生成失败"
 
 
-def parse_document(file_path: str, file_id: str) -> dict:
+def parse_document(file_path: str, file_id: str,
+                  progress_callback: Optional[Callable[[int, str], None]] = None) -> dict:
     """
     解析文档，返回 ParsedDocument dict（严格遵守规范文档 4.1 Schema）
 
     Args:
         file_path: 文件本地路径（uploads/ 目录下）
         file_id:   文件唯一ID（由上传接口生成）
-
+        progress_callback: 可选，进度回调函数，接受 (percent: int, message: str)
+                          例: progress_callback(20, "解析 DOCX 中...")
+                          会在关键阶段被调用，便于外部（如 _run_parse）向数据库回传进度
     Returns:
         ParsedDocument dict
 
@@ -155,7 +158,14 @@ def parse_document(file_path: str, file_id: str) -> dict:
         ValueError:   不支持的文件格式
         RuntimeError: 解析失败（文件损坏/加密等）
     """
+    _report = progress_callback or (lambda pct, msg: None)
+
+    def _pct(p: int, m: str):
+        _report(p, m)
+        logger.debug(f"[parse_document] progress={p}: {m}")
+
     logger.info(f"开始解析文件: {file_path}, file_id: {file_id}")
+    _pct(5, "开始解析...")
 
     # ═══════════════════════════════════════════════════════
     # TODO: 成员2在此实现解析逻辑
@@ -188,16 +198,16 @@ def parse_document(file_path: str, file_id: str) -> dict:
     try:
         # 1. 针对不同格式进行底层解析 [cite: 126-130, 304]
         if ext in ['.txt', '.md']:
-            # 加上 errors='ignore' 防止极个别非标准 utf-8 编码导致崩溃
+            _pct(10, "解析 TXT/MD 文件...")
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 text = f.read()
-                # 这里的 _chunk_text 已经升级为语义切块，MD 文件会自动按标题切分，TXT 会按段落切分
-                # 防空块过滤
                 if text:
                     chunks.extend(_chunk_text(text, file_id))
+            _pct(30, f"TXT/MD 解析完成，共 {len(chunks)} 块")
 
 
         elif ext == '.docx':
+            _pct(10, "解析 DOCX 文件...")
             import docx
 
             docx_md = []
@@ -282,6 +292,7 @@ def parse_document(file_path: str, file_id: str) -> dict:
 
 
         elif ext == '.xlsx':
+            _pct(10, "解析 XLSX 文件...")
             import pandas as pd
             import warnings
 
@@ -396,31 +407,36 @@ def parse_document(file_path: str, file_id: str) -> dict:
 
             # 屏蔽底层的底层红字警告
             fitz.TOOLS.mupdf_display_errors(False)
-            logger.info("PDF 文件：启动基于视觉大模型(VLM)的端到端解析引擎...")
+            logger.info("PDF 文件：尝试视觉大模型解析，失败则降级为文本提取...")
 
-            client = OpenAI(
-                api_key=settings.vlm_api_key,
-                base_url=settings.vlm_base_url,
-            )
-
-            doc = fitz.open(file_path)
-            for i, page in enumerate(doc):
-                # 将 PDF 页面渲染为图片
-                pix = page.get_pixmap(dpi=150)
-                b64_img = base64.b64encode(pix.tobytes("png")).decode("utf-8")
-                prompt_text = (
-                    "请将这张图片中的文档内容完美转换为标准的Markdown格式。\n"
-                    "要求：\n"
-                    "1. 严格保留所有的表格结构（使用Markdown表格表示）。\n"
-                    "2. 严格保留所有的标题层级（使用#表示）。\n"
-                    "3. 如果有公式，请尽量使用LaTeX语法。\n"
-                    "4. 不要包含任何开场白或解释性废话，只输出Markdown正文。"
+            _pct(10, "解析 PDF 文件...")
+            vlm_ok = False
+            try:
+                from openai import OpenAI as _VLMClient
+                # 优先用 Ollama 的视觉模型（需要已拉取 qwen2.5-vl 等多模态模型）
+                _vlm_client = _VLMClient(
+                    api_key=settings.llm_api_key,
+                    base_url=settings.llm_base_url,
                 )
+                # 使用已配置的 LLM 模型（qwen3:8b 有视觉能力的版本）
+                vlm_model = settings.llm_model
 
-                try:
-                    # 🚀 只有这里！仅使用 VLM 把图片变成 Markdown 文本
-                    response = client.chat.completions.create(
-                        model=settings.vlm_model,
+                doc = fitz.open(file_path)
+                total_pages = len(doc)
+                for i, page in enumerate(doc):
+                    pix = page.get_pixmap(dpi=150)
+                    b64_img = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+                    prompt_text = (
+                        "请将这张图片中的文档内容完美转换为标准的Markdown格式。\n"
+                        "要求：\n"
+                        "1. 严格保留所有的表格结构（使用Markdown表格表示）。\n"
+                        "2. 严格保留所有的标题层级（使用#表示）。\n"
+                        "3. 如果有公式，请尽量使用LaTeX语法。\n"
+                        "4. 不要包含任何开场白或解释性废话，只输出Markdown正文。"
+                    )
+
+                    response = _vlm_client.chat.completions.create(
+                        model=vlm_model,
                         messages=[
                             {
                                 "role": "user",
@@ -429,21 +445,33 @@ def parse_document(file_path: str, file_id: str) -> dict:
                                     {"type": "text", "text": prompt_text}
                                 ]
                             }
-                        ]
+                        ],
+                        timeout=60,
                     )
-
                     page_md = response.choices[0].message.content.strip()
                     page_md = re.sub(r'^```markdown\n|```$', '', page_md, flags=re.IGNORECASE | re.MULTILINE).strip()
-
                     if page_md:
-                        # 转换出来的 Markdown 文本直接送入写好的高级切块器
                         chunks.extend(_chunk_text(page_md, file_id, page_num=i + 1))
+                    _pct(10 + int((i + 1) / total_pages * 30), f"PDF VLM 解析第 {i+1}/{total_pages} 页...")
+                doc.close()
+                vlm_ok = True
+                logger.info("PDF VLM 解析成功！")
+                _pct(40, f"PDF VLM 解析完成，共 {len(chunks)} 块")
 
-
-                except Exception as ve:
-                    logger.error(f"第 {i + 1} 页 VLM 解析失败: {ve}")
-                    raise RuntimeError(f"视觉大模型解析失败，请检查网络或 API 配置: {ve}")
-            doc.close()
+            except Exception as ve:
+                logger.warning(f"Ollama VLM 解析失败，降级为文本提取: {ve}")
+                # 降级：使用纯文本提取
+                try:
+                    doc = fitz.open(file_path)
+                    for i, page in enumerate(doc):
+                        text = page.get_text("text")
+                        if text and text.strip():
+                            chunks.extend(_chunk_text(text.strip(), file_id, page_num=i + 1))
+                    doc.close()
+                    logger.info(f"PDF 文本提取完成: {len(chunks)} 块")
+                except Exception as te:
+                    logger.error(f"PDF 文本提取也失败: {te}")
+                    raise RuntimeError(f"PDF 解析失败: VLM错误={ve}, 文本错误={te}")
 
         # ═══════════════════════════════════════════════════════
         # 所有格式解析完毕，chunks 收集完成！
@@ -453,8 +481,12 @@ def parse_document(file_path: str, file_id: str) -> dict:
         # 2. 调用普通文本大模型抽取关键实体与摘要
         logger.info(f"文档切分完毕 (共 {len(chunks)} 块)。正在调用普通文本大模型提取实体和摘要...")
 
+        _pct(50, f"文档切分完成（共 {len(chunks)} 块），正在调用大模型提取实体和摘要...")
+
         # 你的 _extract_entities_and_summary 函数内部使用的是 settings.llm_model，完美解耦！
         entities, summary = _extract_entities_and_summary(chunks)
+
+        _pct(65, "实体和摘要提取完成，正在组装结果...")
 
         # 3. 严格组装返回结果
         parsed_document = {

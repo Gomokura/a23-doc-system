@@ -231,12 +231,18 @@ async def _run_parse(task_id: str, file_id: str, file_path: str):
     from db.database import SessionLocal
     db = SessionLocal()
     try:
-        _update_task(db, task_id, status="processing", progress=10)
- 
+        _update_task(db, task_id, status="processing", progress=5)
+
+        # ── 进度回调：parse_document 内部会调用此回调回传细粒度进度 ──
+        def _on_parse_progress(pct: int, msg: str):
+            # pct 0-70 → 映射到数据库 10-49
+            mapped = min(49, max(10, pct))
+            _update_task(db, task_id, status="processing", progress=mapped)
+
         # ── 调用成员2：文档解析 ──────────────────────────────
         from modules.parser.document_parser import parse_document
         result = await asyncio.get_event_loop().run_in_executor(
-            None, parse_document, file_path, file_id
+            None, parse_document, file_path, file_id, _on_parse_progress
         )
         # ────────────────────────────────────────────────────
  
@@ -248,10 +254,17 @@ async def _run_parse(task_id: str, file_id: str, file_path: str):
 
         # ── 调用成员3：建立检索索引 ──────────────────────────
         from modules.retriever.indexer import build_index
-        # 进入索引阶段前推进到 70%
-        _update_task(db, task_id, status="processing", progress=70)
-        await asyncio.get_event_loop().run_in_executor(None, build_index, result)
+
+        def _on_index_progress(pct: int, msg: str):
+            mapped = min(89, max(70, pct))
+            _update_task(db, task_id, status="processing", progress=mapped)
+
+        ok = await asyncio.get_event_loop().run_in_executor(
+            None, build_index, result, False, _on_index_progress
+        )
         # ────────────────────────────────────────────────────
+        if not ok:
+            raise RuntimeError("向量索引构建失败（常见原因：Ollama 未运行、未拉取 embedding 模型、或 /v1/embeddings 请求格式错误）")
 
         _update_task(db, task_id, status="processing", progress=90)
  

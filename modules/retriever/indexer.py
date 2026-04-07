@@ -4,7 +4,7 @@
 """
 import os
 import pickle
-from typing import Optional, List, Set, Dict
+from typing import Optional, List, Set, Dict, Callable
 
 import numpy as np
 import chromadb
@@ -14,39 +14,43 @@ from loguru import logger
 from config import settings
 
 # ═══════════════════════════════════════════════════════════════════════
-# 硅基流动云端 Embedding（替代本地 SentenceTransformer，接口完全兼容）
+# 本地 Ollama Embedding（调用 http://localhost:11434/v1/embeddings）
 # ═══════════════════════════════════════════════════════════════════════
-class SiliconFlowEmbedder:
+class OllamaEmbedder:
     """
-    调用硅基流动 Embedding API，接口与 SentenceTransformer 保持兼容。
-    使用相同模型（bge-small-zh-v1.5），向量维度不变，现有 ChromaDB 数据无需重建。
+    调用本地 Ollama Embedding API，接口与 SentenceTransformer 保持兼容。
+    模型: nomic-embed-text（推荐，高质量且 Ollama 内置支持）
     """
-    _API_BATCH = 32  # 硅基流动单次最多接受 32 条
+    _API_BATCH = 1  # Ollama /v1/embeddings 单次只能接受 1 条
 
     def __init__(self):
-        from openai import OpenAI
-        self._client = OpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-        )
-        self._model = settings.embed_model  # BAAI/bge-small-zh-v1.5
+        self._base_url = settings.llm_base_url.rstrip("/v1").rstrip("/")
+        self._model = settings.embed_model  # 如 "nomic-embed-text"
 
     def encode(self, sentences, normalize_embeddings: bool = False,
                convert_to_numpy: bool = True, batch_size: int = None):
+        import requests as _requests
+
         single = isinstance(sentences, str)
         if single:
             sentences = [sentences]
 
         all_vecs: list = []
-        step = batch_size or self._API_BATCH
-        for i in range(0, len(sentences), step):
-            batch = sentences[i: i + step]
-            resp = self._client.embeddings.create(
-                model=self._model,
-                input=batch,
-                encoding_format="float",
+        for text in sentences:
+            # /v1/embeddings 为 OpenAI 兼容接口，字段必须是 input，不能用 prompt（prompt 仅用于 /api/embeddings）
+            resp = _requests.post(
+                f"{self._base_url}/v1/embeddings",
+                json={"model": self._model, "input": text},
+                timeout=120,
             )
-            all_vecs.extend(item.embedding for item in resp.data)
+            resp.raise_for_status()
+            body = resp.json()
+            if "data" in body and body["data"]:
+                all_vecs.append(body["data"][0]["embedding"])
+            elif "embedding" in body:
+                all_vecs.append(body["embedding"])
+            else:
+                raise ValueError(f"无法解析 Ollama 向量响应: keys={list(body.keys())}")
 
         arr = np.array(all_vecs, dtype=np.float32)
 
@@ -55,12 +59,11 @@ class SiliconFlowEmbedder:
             norms = np.where(norms == 0, 1.0, norms)
             arr = arr / norms
 
-        # 单条输入返回 1D 数组，与 SentenceTransformer 行为一致
         return arr[0] if single else arr
 
 
 # 全局变量（模块级缓存）
-_embed_model: Optional[SiliconFlowEmbedder] = None
+_embed_model: Optional[OllamaEmbedder] = None
 _chroma_client: Optional[chromadb.PersistentClient] = None
 
 # 兼容旧逻辑保留
@@ -86,12 +89,12 @@ def get_tokenized_corpus_pkl() -> List[list]:
 BATCH_SIZE = 32  # 批量编码大小，可根据内存调整
 
 
-def _get_embed_model() -> SiliconFlowEmbedder:
-    """获取或初始化云端 Embedding 客户端（单例模式）"""
+def _get_embed_model() -> OllamaEmbedder:
+    """获取或初始化本地 Ollama Embedding 客户端（单例模式）"""
     global _embed_model
     if _embed_model is None:
-        logger.info(f"初始化硅基流动 Embedding: model={settings.embed_model}")
-        _embed_model = SiliconFlowEmbedder()
+        logger.info(f"初始化 Ollama Embedding: base_url={settings.llm_base_url}, model={settings.embed_model}")
+        _embed_model = OllamaEmbedder()
     return _embed_model
 
 
@@ -200,22 +203,30 @@ def _save_bm25_index(tokenized_corpus: list = None) -> bool:
         return False
 
 
-def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
+def build_index(parsed_doc: dict, force_rebuild: bool = False,
+                progress_callback: Optional[Callable[[int, str], None]] = None) -> bool:
     """
     将 ParsedDocument 写入向量数据库（ChromaDB）和 BM25 索引
 
     Args:
         parsed_doc: ParsedDocument dict（规范文档 4.1）
         force_rebuild: 是否强制重建（忽略增量检查）
-
+        progress_callback: 可选，进度回调，接受 (percent: int, message: str)
+                          percent 范围 70-100
     Returns:
         True 成功 / False 失败
     """
+    _report = progress_callback or (lambda pct, msg: None)
+
+    def _pct(p: int, m: str):
+        _report(p, m)
+
     file_id = parsed_doc.get("file_id", "unknown")
     filename = parsed_doc.get("filename", "unknown")
     chunks = parsed_doc.get("chunks", [])
 
     logger.info(f"开始构建索引: file_id={file_id}, chunks数量={len(chunks)}")
+    _pct(71, f"开始构建索引（{len(chunks)} 块）...")
 
     if not chunks:
         logger.warning(f"文档 {file_id} 没有 chunks，跳过索引构建")
@@ -270,7 +281,8 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
             batch = all_contents[i:i + BATCH_SIZE]
             batch_embeddings = model.encode(batch, convert_to_numpy=True)
             all_embeddings.extend(batch_embeddings.tolist())
-            logger.debug(f"编码进度: {min(i + BATCH_SIZE, len(all_contents))}/{len(all_contents)}")
+            pct = 71 + int((i + BATCH_SIZE) / len(all_contents) * 18)
+            _pct(min(89, pct), f"编码进度 {min(i + BATCH_SIZE, len(all_contents))}/{len(all_contents)}...")
 
         logger.info(f"批量编码完成: {len(all_embeddings)} 条")
 
@@ -301,6 +313,7 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
                 metadatas=metadatas
             )
             logger.info(f"ChromaDB 写入完成: {len(ids)} 条")
+            _pct(90, "ChromaDB 写入完成，正在持久化索引...")
 
         _indexed_files.add(file_id)
 

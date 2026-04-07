@@ -212,17 +212,31 @@ def _build_prompt(query: str, chunks: list, scenario: str = "default") -> str:
 
 
 def detect_conflicts(chunks: list) -> list:
-    conflicts = []
+    """
+    从检索到的片段中扫描是否出现「同一语义字段多个不同取值」。
+    注意：名单/表格类文档里多行日期、学号、序号会被旧版宽松正则误判为冲突，
+    进而让前端显示「多源冲突」、拉低用户对答案的信任；此处已收紧规则。
+    """
+    import re
 
+    conflicts = []
+    # 金额：必须有货币单位，避免把学号、序号、年份等纯数字当成「多个金额」
     key_patterns = [
-        ("金额", [r"(\d+\.?\d*万)", r"(¥?\d+)"]),
-        ("日期", [r"(\d{4}年\d{1,2}月\d{1,2}日)", r"(\d{4}-\d{2}-\d{2})"]),
-        ("比例", [r"(\d+\.?\d*%)", r"(\d+)%"]),
+        ("金额", [
+            r"(\d+(?:\.\d+)?\s*万元)",
+            r"(\d+(?:\.\d+)?\s*元)",
+            r"(¥\s*\d+(?:\.\d+)?)",
+            r"(人民币\s*\d+(?:\.\d+)?\s*元?)",
+        ]),
+        ("日期", [
+            r"(\d{4}年\d{1,2}月\d{1,2}日)",
+            r"(\d{4}-\d{2}-\d{2})",
+        ]),
+        ("比例", [r"(\d+\.?\d*%)", r"(\d+)\s*%"]),
         ("公司名", [r"([^\s]{4,}公司)", r"([^\s]{2,}贸易)", r"([^\s]{2,}科技)"]),
     ]
 
     for key_name, patterns in key_patterns:
-        import re
         value_to_chunks = {}
 
         for chunk in chunks:
@@ -234,12 +248,18 @@ def detect_conflicts(chunks: list) -> list:
                     if val and len(val) > 1:
                         value_to_chunks.setdefault(val, []).append(chunk.get("chunk_id", ""))
 
-        if len(value_to_chunks) > 1:
-            conflicts.append({
-                "key": key_name,
-                "values": list(value_to_chunks.keys()),
-                "from_chunks": list(value_to_chunks.values())
-            })
+        distinct = len(value_to_chunks)
+        if distinct <= 1:
+            continue
+        # 表格里常见「每行一个日期」，多种日期并不等于信息矛盾
+        if key_name == "日期" and distinct > 4:
+            continue
+
+        conflicts.append({
+            "key": key_name,
+            "values": list(value_to_chunks.keys()),
+            "from_chunks": list(value_to_chunks.values())
+        })
 
     return conflicts
 
