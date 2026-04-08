@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
-
 interface Props {
   modelValue: number
 }
@@ -22,28 +20,6 @@ const navItems = [
 const handleNav = (id: number) => {
   emit('update:modelValue', id)
 }
-
-// 动态检测后端连接状态
-const backendOk = ref(false)
-let healthTimer: ReturnType<typeof setInterval> | null = null
-
-async function checkHealth() {
-  try {
-    const res = await fetch('/api/health', { signal: AbortSignal.timeout(3000) })
-    backendOk.value = res.ok
-  } catch {
-    backendOk.value = false
-  }
-}
-
-onMounted(() => {
-  checkHealth()
-  healthTimer = setInterval(checkHealth, 15000)
-})
-
-onUnmounted(() => {
-  if (healthTimer) clearInterval(healthTimer)
-})
 </script>
 
 <template>
@@ -72,10 +48,8 @@ onUnmounted(() => {
     <div class="border-t border-border-l mx-2"></div>
     <div class="px-4 py-3 text-xs text-muted">
       <div class="flex justify-between items-center mb-1">
-        <span>后端状态</span>
-        <span :class="backendOk ? 'text-green font-semibold' : 'text-red font-semibold'">
-          {{ backendOk ? '已连接' : '未连接' }}
-        </span>
+        <span>Mock 模式</span>
+        <span class="text-green font-semibold">ON</span>
       </div>
       <div class="text-border-l text-xs break-all">http://localhost:8000</div>
     </div>

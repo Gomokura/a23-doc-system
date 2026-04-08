@@ -9,7 +9,6 @@ openpyxl==3.1.2
 pdfplumber==0.11.0
 xlrd==2.0.1
 httpx==0.27.2
-requests==2.32.3
 PyMuPDF==1.24.2
 
 # LLM and retriever
@@ -18,11 +17,10 @@ langchain-community==0.2.0
 openai==1.30.0
 chromadb==0.5.0
 rank-bm25==0.2.2
-# bm25s: fast BM25 with persistence; faster cold start than rank-bm25
-bm25s==0.3.3
+bm25s==0.3.3  # 极速 BM25，支持持久化，冷启动比 rank_bm25 快 5-10 倍
 sentence-transformers==3.0.0
-# ReRanker: Qwen/Qwen3-Reranker-0.6B (32K context, MTEB-R, runs on CPU)
-# Paper: https://arxiv.org/abs/2506.05176
+# ReRanker: Qwen/Qwen3-Reranker-0.6B (32K context, 65.80 MTEB-R, CPU 可跑)
+# 论文: https://arxiv.org/abs/2506.05176
 
 # Database
 sqlalchemy==2.0.30
