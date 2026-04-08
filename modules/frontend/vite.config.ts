@@ -28,6 +28,7 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
+        // 不要改写 Content-Type：空响应/502 时强行标成 JSON 会误导前端 parse
       },
     },
   },

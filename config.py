@@ -2,33 +2,52 @@
 全局配置 - 负责人: 成员1
 所有配置从 .env 文件读取，禁止在代码中硬编码 API Key
 """
+import os
 from pydantic_settings import BaseSettings
+
+# 项目根目录（自动计算，无论从哪里启动都正确）
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class Settings(BaseSettings):
-    # LLM 配置（使用 Ollama 本地部署，完全免费）
-    # 首次使用需先安装 Ollama：https://ollama.com/download
-    # 然后在终端运行：ollama pull qwen3:8b
-    llm_api_key:  str = "ollama"
-    llm_base_url: str = "http://localhost:11434/v1"
-    llm_model:    str = "qwen3:8b"
+    # LLM 配置（使用硅基流动云端 API）
+    llm_api_key:  str = ""  # 请在 .env 中配置 LLM_API_KEY，禁止在此硬编码
+    llm_base_url: str = "https://api.siliconflow.cn/v1"
+    llm_model:    str = "Qwen/Qwen2.5-7B-Instruct"
 
     # 👇 -------- 新增：VLM 视觉大模型配置 (专供 PDF 图片解析) -------- 👇
-    vlm_api_key: str = "填入你的云端视觉大模型API_KEY"  # 建议用硅基流动等免费/廉价的云端 API
+    vlm_api_key: str = ""  # 请在 .env 中配置 VLM_API_KEY，禁止在此硬编码
     vlm_base_url: str = "https://api.siliconflow.cn/v1"
     vlm_model: str = "Qwen/Qwen2-VL-72B-Instruct"  # 强大的视觉模型
     # 👆 ----------------------------------------------------------- 👆
 
-    # 嵌入模型（本地运行，Kaggle 可用）
-    embed_model: str = "BAAI/bge-small-zh-v1.5"
+    # 本地 Ollama：PDF 逐页看图 OCR 用视觉模型（占内存大）；问答/实体抽取用 llm_model（宜选小模型省内存）
+    # 为空则 PDF 也走 llm_model（与旧版行为一致）
+    pdf_vlm_model: str = ""
 
-    # 数据库路径
-    chroma_path: str = "./db/chroma"
-    sqlite_path: str = "./db/app.db"
+    # 嵌入模型（本地 Ollama，nomic-embed-text 是 Ollama 内置的优质 Embedding 模型）
+    embed_model: str = "nomic-embed-text"
 
-    # 文件目录
-    upload_dir: str = "./uploads"
-    output_dir: str = "./outputs"
+    # 数据库路径（自动转为绝对路径，解决从任意目录启动找不到数据库的问题）
+    @property
+    def sqlite_path(self) -> str:
+        p = os.environ.get("SQLITE_PATH") or "./db/app.db"
+        return os.path.abspath(os.path.join(BASE_DIR, p))
+
+    @property
+    def chroma_path(self) -> str:
+        p = os.environ.get("CHROMA_PATH") or "./db/chroma"
+        return os.path.abspath(os.path.join(BASE_DIR, p))
+
+    @property
+    def upload_dir(self) -> str:
+        p = os.environ.get("UPLOAD_DIR") or "./uploads"
+        return os.path.abspath(os.path.join(BASE_DIR, p))
+
+    @property
+    def output_dir(self) -> str:
+        p = os.environ.get("OUTPUT_DIR") or "./outputs"
+        return os.path.abspath(os.path.join(BASE_DIR, p))
 
     # 文件限制
     max_file_size_mb: int = 50
@@ -37,7 +56,7 @@ class Settings(BaseSettings):
     # 检索配置
     vector_weight: float = 0.6
     bm25_weight:   float = 0.4
-    top_k:         int   = 5
+    top_k:         int   = 8
 
     # ChromaDB 高级配置 ⭐ NEW
     chroma_distance_metric: str = "cosine"  # 距离度量: cosine(余弦) | l2(欧氏) | ip(内积)
@@ -45,7 +64,7 @@ class Settings(BaseSettings):
     chroma_n_results: int = 10  # 默认检索数量（会乘以 top_k）
 
     # ReRanker 配置
-    reranker_enabled: bool = True  # 是否启用 CrossEncoder 重排序
+    reranker_enabled: bool = True  # 是否启用 CrossEncoder 重排序（首次加载慢，建议先关闭）
     reranker_model: str = "Qwen/Qwen3-Reranker-0.6B"  # 中文 CrossEncoder 模型（支持中英文 rerank）
     reranker_top_k: int = 5  # ReRanker 保留结果数
 
@@ -79,9 +98,11 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = {
+        "env_file": os.path.join(BASE_DIR, ".env"),
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",  # 允许 .env 中有多余的字段
+    }
 
 
 settings = Settings()

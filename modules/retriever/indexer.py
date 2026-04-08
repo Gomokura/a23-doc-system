@@ -4,17 +4,66 @@
 """
 import os
 import pickle
-from typing import Optional, List, Set, Dict
+from typing import Optional, List, Set, Dict, Callable
 
+import numpy as np
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 from loguru import logger
-from sentence_transformers import SentenceTransformer
 
 from config import settings
 
+# ═══════════════════════════════════════════════════════════════════════
+# 本地 Ollama Embedding（调用 http://localhost:11434/v1/embeddings）
+# ═══════════════════════════════════════════════════════════════════════
+class OllamaEmbedder:
+    """
+    调用本地 Ollama Embedding API，接口与 SentenceTransformer 保持兼容。
+    模型: nomic-embed-text（推荐，高质量且 Ollama 内置支持）
+    """
+    _API_BATCH = 1  # Ollama /v1/embeddings 单次只能接受 1 条
+
+    def __init__(self):
+        self._base_url = settings.llm_base_url.rstrip("/v1").rstrip("/")
+        self._model = settings.embed_model  # 如 "nomic-embed-text"
+
+    def encode(self, sentences, normalize_embeddings: bool = False,
+               convert_to_numpy: bool = True, batch_size: int = None):
+        import requests as _requests
+
+        single = isinstance(sentences, str)
+        if single:
+            sentences = [sentences]
+
+        all_vecs: list = []
+        for text in sentences:
+            # /v1/embeddings 为 OpenAI 兼容接口，字段必须是 input，不能用 prompt（prompt 仅用于 /api/embeddings）
+            resp = _requests.post(
+                f"{self._base_url}/v1/embeddings",
+                json={"model": self._model, "input": text},
+                timeout=120,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            if "data" in body and body["data"]:
+                all_vecs.append(body["data"][0]["embedding"])
+            elif "embedding" in body:
+                all_vecs.append(body["embedding"])
+            else:
+                raise ValueError(f"无法解析 Ollama 向量响应: keys={list(body.keys())}")
+
+        arr = np.array(all_vecs, dtype=np.float32)
+
+        if normalize_embeddings:
+            norms = np.linalg.norm(arr, axis=1, keepdims=True)
+            norms = np.where(norms == 0, 1.0, norms)
+            arr = arr / norms
+
+        return arr[0] if single else arr
+
+
 # 全局变量（模块级缓存）
-_embed_model: Optional[SentenceTransformer] = None
+_embed_model: Optional[OllamaEmbedder] = None
 _chroma_client: Optional[chromadb.PersistentClient] = None
 
 # 兼容旧逻辑保留
@@ -26,8 +75,15 @@ _bm25_records: List[Dict] = []
 
 _indexed_files: Set[str] = set()  # 已索引的文件ID集合
 
-# P3 新增：持久化分词结果，避免冷启动时重复分词
+# BM25 持久化分词结果，避免冷启动时重复分词
 _tokenized_corpus_pkl: List[list] = []  # 已持久化的分词语料
+
+# ⚠️ M3-006 修复: 当前索引数据格式版本号
+# 版本变更说明：
+#   v0 (无版本字段): 初始版本
+#   v1: 当前版本，包含 records + indexed_files + tokenized_corpus
+# 当数据结构变更时，递增版本号。加载时版本不匹配则自动重建索引。
+INDEX_VERSION = 1
 
 
 def get_tokenized_corpus_pkl() -> List[list]:
@@ -40,12 +96,12 @@ def get_tokenized_corpus_pkl() -> List[list]:
 BATCH_SIZE = 32  # 批量编码大小，可根据内存调整
 
 
-def _get_embed_model() -> SentenceTransformer:
-    """获取或初始化嵌入模型（单例模式）"""
+def _get_embed_model() -> OllamaEmbedder:
+    """获取或初始化本地 Ollama Embedding 客户端（单例模式）"""
     global _embed_model
     if _embed_model is None:
-        logger.info(f"加载嵌入模型: {settings.embed_model}")
-        _embed_model = SentenceTransformer(settings.embed_model)
+        logger.info(f"初始化 Ollama Embedding: base_url={settings.llm_base_url}, model={settings.embed_model}")
+        _embed_model = OllamaEmbedder()
     return _embed_model
 
 
@@ -95,13 +151,32 @@ def _load_bm25_index() -> bool:
     """从磁盘加载 BM25 索引和已索引文件列表"""
     global _bm25_corpus, _bm25_doc_map, _bm25_records, _indexed_files, _tokenized_corpus_pkl
 
-    bm25_path = os.path.join(settings.chroma_path, "bm25_index.pkl")
-    if not os.path.exists(bm25_path):
+    # ⚠️ M3-008 修复: 使用语义化的 .bm25 扩展名，区分普通 pickle 文件
+    # 优先加载 .bm25（新扩展名），若无则尝试 .pkl（兼容旧版本）
+    bm25_path_new = os.path.join(settings.chroma_path, "bm25_index.bm25")
+    bm25_path_old = os.path.join(settings.chroma_path, "bm25_index.pkl")
+    if os.path.exists(bm25_path_new):
+        bm25_path = bm25_path_new
+    elif os.path.exists(bm25_path_old):
+        bm25_path = bm25_path_old
+        logger.info("检测到旧版 .pkl 索引文件，将使用新扩展名 .bm25 保存")
+    else:
         return False
 
     try:
         with open(bm25_path, "rb") as f:
             data = pickle.load(f)
+
+        # ⚠️ M3-006 修复: 版本校验
+        # - 无 version 字段（旧版本）→ 触发自动重建
+        # - version != INDEX_VERSION → 触发自动重建
+        saved_version = data.get("version", 0)
+        if saved_version != INDEX_VERSION:
+            logger.warning(
+                f"BM25 索引版本不匹配 (保存={saved_version}, 当前={INDEX_VERSION})，"
+                f"将重新构建索引。常见原因：代码升级后数据结构变更。"
+            )
+            return False
 
         _indexed_files = set(data.get("indexed_files", []))
         _tokenized_corpus_pkl = data.get("tokenized_corpus", [])
@@ -139,37 +214,47 @@ def _load_bm25_index() -> bool:
 
 def _save_bm25_index(tokenized_corpus: list = None) -> bool:
     """持久化 BM25 索引到磁盘（包含分词结果以加速冷启动）"""
-    bm25_path = os.path.join(settings.chroma_path, "bm25_index.pkl")
+    # ⚠️ M3-008 修复: 使用语义化的 .bm25 扩展名
+    bm25_path = os.path.join(settings.chroma_path, "bm25_index.bm25")
     try:
         with open(bm25_path, "wb") as f:
             pickle.dump({
+                "version": INDEX_VERSION,  # ⚠️ M3-006 修复: 写入版本号
                 "records": _bm25_records,
                 "indexed_files": list(_indexed_files),
                 "tokenized_corpus": tokenized_corpus if tokenized_corpus is not None else [],
             }, f)
-        logger.info(f"BM25 索引已持久化: {bm25_path}, 分词语料 {len(tokenized_corpus) if tokenized_corpus else 0} 条")
+        logger.info(f"BM25 索引已持久化: {bm25_path}, 分词语料 {len(tokenized_corpus) if tokenized_corpus else 0} 条, 版本 v{INDEX_VERSION}")
         return True
     except Exception as e:
         logger.error(f"持久化 BM25 索引失败: {e}")
         return False
 
 
-def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
+def build_index(parsed_doc: dict, force_rebuild: bool = False,
+                progress_callback: Optional[Callable[[int, str], None]] = None) -> bool:
     """
     将 ParsedDocument 写入向量数据库（ChromaDB）和 BM25 索引
 
     Args:
         parsed_doc: ParsedDocument dict（规范文档 4.1）
         force_rebuild: 是否强制重建（忽略增量检查）
-
+        progress_callback: 可选，进度回调，接受 (percent: int, message: str)
+                          percent 范围 70-100
     Returns:
         True 成功 / False 失败
     """
+    _report = progress_callback or (lambda pct, msg: None)
+
+    def _pct(p: int, m: str):
+        _report(p, m)
+
     file_id = parsed_doc.get("file_id", "unknown")
     filename = parsed_doc.get("filename", "unknown")
     chunks = parsed_doc.get("chunks", [])
 
     logger.info(f"开始构建索引: file_id={file_id}, chunks数量={len(chunks)}")
+    _pct(71, f"开始构建索引（{len(chunks)} 块）...")
 
     if not chunks:
         logger.warning(f"文档 {file_id} 没有 chunks，跳过索引构建")
@@ -183,15 +268,10 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
 
     try:
         model = _get_embed_model()
-        client = _get_chroma_client()
 
-        collection = client.get_or_create_collection(
-            name="documents",
-            metadata={
-                "description": "A23 文档检索集合",
-                "distance_metric": settings.chroma_distance_metric,
-            }
-        )
+        # ⚠️ M3-007 修复: 统一使用 get_collection() 获取 collection
+        # 避免 get_or_create_collection 在重复调用时不更新元数据
+        collection = get_collection()
 
         ids = []
         embeddings = []
@@ -199,6 +279,11 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
         metadatas = []
 
         _load_bm25_index()
+
+        # 强制重建且该文件曾写入过索引：必须先删旧向量/BM25，否则会与 collection.add 叠旧数据或残留错误正文
+        if force_rebuild and file_id in _indexed_files:
+            logger.info(f"强制重建索引：先删除 file_id={file_id} 的旧向量与 BM25 记录")
+            delete_index(file_id)
 
         chunk_data_list = []
         for chunk in chunks:
@@ -224,7 +309,8 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
             batch = all_contents[i:i + BATCH_SIZE]
             batch_embeddings = model.encode(batch, convert_to_numpy=True)
             all_embeddings.extend(batch_embeddings.tolist())
-            logger.debug(f"编码进度: {min(i + BATCH_SIZE, len(all_contents))}/{len(all_contents)}")
+            pct = 71 + int((i + BATCH_SIZE) / len(all_contents) * 18)
+            _pct(min(89, pct), f"编码进度 {min(i + BATCH_SIZE, len(all_contents))}/{len(all_contents)}...")
 
         logger.info(f"批量编码完成: {len(all_embeddings)} 条")
 
@@ -255,6 +341,7 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False) -> bool:
                 metadatas=metadatas
             )
             logger.info(f"ChromaDB 写入完成: {len(ids)} 条")
+            _pct(90, "ChromaDB 写入完成，正在持久化索引...")
 
         _indexed_files.add(file_id)
 
@@ -287,8 +374,52 @@ def get_bm25_records(file_ids: Optional[list] = None) -> List[Dict]:
 
 def get_collection():
     """获取 ChromaDB 集合，供 hybrid_retriever 使用"""
+    # ⚠️ M3-007 修复: 分离 get 和 create 操作，
+    # 先尝试获取，若不存在则创建；获取后显式更新元数据（而非依赖 get_or_create）
     client = _get_chroma_client()
-    return client.get_collection("documents")
+    try:
+        collection = client.get_collection("documents")
+    except Exception:
+        # collection 不存在时 get_collection 抛出异常，此时创建
+        logger.info("ChromaDB collection 'documents' 不存在，创建新集合")
+        collection = client.create_collection(
+            name="documents",
+            metadata={
+                "description": "A23 文档检索集合",
+                "distance_metric": settings.chroma_distance_metric,
+            }
+        )
+
+    # ⚠️ M3-007 修复: 显式更新元数据
+    # ChromaDB 的 get_or_create_collection 在 collection 已存在时不更新 metadata，
+    # 故改为分离操作 + 手动 update（若 ChromaDB 版本支持）
+    _update_collection_metadata(collection, {
+        "description": "A23 文档检索集合",
+        "distance_metric": settings.chroma_distance_metric,
+    })
+    return collection
+
+
+def _update_collection_metadata(collection, metadata: dict):
+    """
+    尝试更新 collection 元数据。
+    ChromaDB 0.4.x 开始支持 modify()，旧版本直接跳过（有兼容逻辑）。
+    """
+    try:
+        # 部分 ChromaDB 版本支持直接设置
+        if hasattr(collection, "modify") and callable(getattr(collection, "modify")):
+            collection.modify(metadata=metadata)
+            logger.debug(f"Collection 元数据已更新: {metadata}")
+        else:
+            logger.debug("当前 ChromaDB 版本不支持 modify()，元数据更新跳过（不影响功能）")
+    except TypeError:
+        # modify() 不接受 keyword 参数时尝试 positional
+        try:
+            collection.modify(metadata)
+        except Exception as e:
+            logger.debug(f"Collection metadata update failed (non-critical): {e}")
+    except Exception as e:
+        logger.debug(f"Collection metadata update failed (non-critical): {e}")
 
 
 def delete_index(file_id: str) -> bool:
