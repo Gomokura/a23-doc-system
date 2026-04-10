@@ -354,10 +354,10 @@ const handleBatchParse = async () => {
     </div>
 
     <!-- 上传区域 -->
-    <div class="grid grid-cols-12 gap-8">
-      <div class="col-span-5">
+    <div class="space-y-5">
+      <div>
         <label class="block text-sm font-medium text-text2 mb-2">选择文件</label>
-        <label class="bg-white border-2 border-dashed border-border rounded-lg p-12 text-center hover:border-accent transition-colors cursor-pointer h-full flex flex-col items-center justify-center block">
+        <label class="bg-white border-2 border-dashed border-border rounded-lg p-12 text-center hover:border-accent transition-colors cursor-pointer min-h-[320px] flex flex-col items-center justify-center block">
           <div class="text-5xl mb-4">📁</div>
           <div class="text-sm text-text2 mb-2 font-medium">拖拽文件至此，或点击选择</div>
           <div class="text-xs text-muted mb-6">支持 PDF · DOCX · XLSX · TXT · MD</div>
@@ -373,10 +373,7 @@ const handleBatchParse = async () => {
         </label>
       </div>
 
-      <div class="col-span-2"></div>
-
-      <div class="col-span-5 space-y-4">
-        <!-- 上传按钮 -->
+      <div class="bg-white border border-border rounded-lg p-5 space-y-4">
         <button
           @click="handleUpload"
           :disabled="loading || !file"
@@ -385,7 +382,6 @@ const handleBatchParse = async () => {
           {{ loading ? '处理中...' : '上传并解析' }}
         </button>
 
-        <!-- File ID -->
         <div v-if="fileId">
           <label class="block text-sm font-medium text-text2 mb-1">File ID</label>
           <div class="flex gap-2">

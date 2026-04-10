@@ -16,7 +16,8 @@ const navItems = [
   { icon: '📤', label: '文档上传', id: 0 },
   { icon: '💬', label: '智能问答', id: 1 },
   { icon: '📋', label: '表格回填', id: 2 },
-  { icon: '🖥️', label: '系统状态', id: 3 },
+  { icon: '🖥️', label: '文档操作', id: 4 },
+  { icon: '🔧', label: '系统状态', id: 3 },
 ]
 
 const handleNav = (id: number) => {

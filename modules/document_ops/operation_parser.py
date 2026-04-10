@@ -74,7 +74,10 @@ OPERATION_PATTERNS = {
         r"添加.*章节", r"在.*后添加"
     ],
     OperationType.DELETE_PARAGRAPH: [
-        r"删除.*段落", r"移除.*内容", r"清除.*文字"
+        r"删除.*段落", r"删除.*段", r"删除最后.*", r"删除末尾.*",
+        r"移除.*段落", r"移除.*内容", r"清除.*文字",
+        r"删掉.*段", r"删掉.*行", r"删掉最后.*", r"删掉末尾.*",
+        r"把.*删掉", r"把最后.*删掉", r"去掉.*段", r"去掉.*行"
     ],
     OperationType.EXTRACT_CONTENT: [
         r"提取.*内容", r"获取.*信息", r"查找.*数据",
@@ -226,9 +229,18 @@ class OperationParser:
         params = {}
         
         # 提取段落/位置信息
-        para_match = re.search(r'第[一二三四五六七八九十\d]+[段节条章]', instruction)
+        para_match = re.search(r'第[一二三四五六七八九十\d]+[段节条章行]', instruction)
         if para_match:
-            params['position'] = para_match.group()
+            raw_position = para_match.group()
+            if raw_position.endswith('行'):
+                raw_position = raw_position[:-1] + '段'
+            params['position'] = raw_position
+        else:
+            last_match = re.search(r'(最后|末尾|结尾)(一)?[段节条章行]?', instruction)
+            if last_match:
+                params['position'] = '末尾'
+            elif '开头' in instruction or '最前' in instruction or '第一段' in instruction or '第一行' in instruction:
+                params['position'] = '开头'
         
         # 提取具体内容
         content_match = re.search(r'把[""""](.+?)["""]', instruction)

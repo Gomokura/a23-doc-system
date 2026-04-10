@@ -14,9 +14,6 @@
       <div class="px-3.5 py-1.5 text-sm text-accent font-semibold rounded-md bg-accent-bg cursor-default">
         文档工作台
       </div>
-      <div class="px-3.5 py-1.5 text-sm text-text2 font-normal rounded-md cursor-pointer hover:bg-surface2">
-        使用文档
-      </div>
     </div>
     <div class="flex items-center gap-2">
       <div class="px-2.5 py-1 rounded text-xs font-semibold text-accent bg-accent-bg border border-accent-light">

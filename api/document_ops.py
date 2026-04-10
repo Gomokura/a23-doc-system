@@ -164,7 +164,8 @@ async def operate_document(body: OperationRequest, db: Session = Depends(get_db)
             "reasoning": operation.reasoning,
             "instruction": body.instruction,
             "result": result,
-            "backup_path": backup_path
+            "backup_path": backup_path,
+            "download_url": f"/api/document/download_uploaded/{body.file_id}" if result.get("success", False) else None,
         }
     except Exception as e:
         raise AppError(500, "OPERATION_FAILED", f"操作执行失败: {str(e)}")
@@ -518,6 +519,16 @@ async def batch_operations(body: BatchOperationRequest, db: Session = Depends(ge
 # ─────────────────────────────────────────────────────────────────────────────
 # 文件下载接口
 # ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/download_uploaded/{file_id}", summary="下载修改后的上传副本")
+async def download_uploaded_file(file_id: str, db: Session = Depends(get_db)):
+    """下载 uploads 中当前 file_id 对应的最新文件。"""
+    record = _get_file_record(file_id, db)
+    return FileResponse(
+        path=record.file_path,
+        filename=record.filename,
+    )
+
 
 @router.get("/download_result")
 async def download_result(path: str, db: Session = Depends(get_db)):
