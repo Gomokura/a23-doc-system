@@ -1,1 +1,612 @@
-﻿<script setup lang="ts">import { ref, computed, onMounted } from 'vue'import { ElMessage } from 'element-plus'import { parseResponseJson } from '@/utils/parseApiResponse'// 鈹€鈹€ 绫诲瀷瀹氫箟 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€interface FileRecord {  file_id: string  filename: string  status: string  chunk_count: number}interface FieldItem {  field: string  value: string  status: 'pending' | 'extracting' | 'success' | 'warning' | 'error'  confidence: number  sourceChunk: string}interface Progress {  upload: boolean  parse: boolean  extract: boolean  fill: boolean  done: boolean}// 鈹€鈹€ 鐘舵€?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€const templateFile = ref<File | null>(null)const templateFileId = ref('')const templateList = ref<FileRecord[]>([])const useExisting = ref(false)const selectedTemplateId = ref('')const fieldList = ref<FieldItem[]>([])           // 鑷姩瑙ｆ瀽鍑虹殑瀛楁const sourceFileIds = ref<string[]>([])           // 鏁版嵁鏉ユ簮鏂囦欢const loading = ref(false)const step = ref<keyof Progress>('upload')const progress = ref<Progress>({  upload: false,  parse: false,  extract: false,  fill: false,  done: false,})const outputFileId = ref('')const downloadUrl = ref('')const errorMsg = ref('')// 鈹€鈹€ 鐢熷懡鍛ㄦ湡 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€onMounted(loadFileList)// 鈹€鈹€ 宸ュ叿鍑芥暟 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€const getStatusIcon = (s: string) =>  s === 'success' ? '鉁? : s === 'extracting' ? '鈴? : s === 'warning' ? '鈿? : s === 'error' ? '鉁? : '鈼?const getStatusColor = (s: string) =>  s === 'success' ? 'text-green' :  s === 'extracting' ? 'text-accent' :  s === 'warning' ? 'text-yellow-600' :  s === 'error' ? 'text-red' : 'text-muted'const getConfColor = (c: number) =>  c >= 90 ? 'text-green' : c >= 75 ? 'text-accent' : c >= 50 ? 'text-yellow-500' : 'text-red'const indexedFiles = computed(() =>  templateList.value.filter(f => f.status === 'indexed'))const selectedFiles = computed(() =>  templateList.value.filter(f => sourceFileIds.value.includes(f.file_id)))const allFieldsReady = computed(() =>  fieldList.value.length > 0 && fieldList.value.every(f => f.status !== 'pending'))// 鈹€鈹€ 鍔犺浇鏂囦欢鍒楄〃 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€async function loadFileList() {  try {    const res = await fetch('/api/files')    const data = (await parseResponseJson(res)) as { files?: FileRecord[] }    if (res.ok) templateList.value = data.files || []  } catch { /* 闈欓粯 */ }}// 鈹€鈹€ 涓婁紶妯℃澘骞惰嚜鍔ㄨВ鏋愬崰浣嶇 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€async function handleUploadTemplate() {  if (!templateFile.value) {    ElMessage.warning('璇峰厛閫夋嫨 Word 鎴?Excel 妯℃澘鏂囦欢')    return  }  progress.value.upload = true  progress.value.parse = false  progress.value.extract = false  progress.value.fill = false  progress.value.done = false  step.value = 'parse'  fieldList.value = []  errorMsg.value = ''  try {    // 1. 涓婁紶妯℃澘    const fd = new FormData()    fd.append('file', templateFile.value)    const upRes = await fetch('/api/upload', { method: 'POST', body: fd })    const upData = (await parseResponseJson(upRes)) as Record<string, any>    if (!upRes.ok) throw new Error(upData.detail || '涓婁紶澶辫触')    templateFileId.value = upData.file_id    progress.value.upload = true    // 2. 鑷姩瑙ｆ瀽鍗犱綅绗?    const parseRes = await fetch('/api/template/placeholders', {      method: 'POST',      headers: { 'Content-Type': 'application/json' },      body: JSON.stringify({ template_file_id: templateFileId.value })    })    const parseData = (await parseResponseJson(parseRes)) as Record<string, any>    if (!parseRes.ok) throw new Error(parseData.detail || '瑙ｆ瀽鍗犱綅绗﹀け璐?)    if (!parseData.fields || parseData.fields.length === 0) {      ElMessage.warning('妯℃澘涓湭鎵惧埌鍙～鍐欏瓧娈?)      fieldList.value = []    } else {      const methodLabel = parseData.method === 'llm' ? 'AI鏅鸿兘璇嗗埆' : '鍗犱綅绗﹁В鏋?      fieldList.value = parseData.fields.map((f: string) => ({        field: f,        value: '',        status: 'pending' as const,        confidence: 0,        sourceChunk: '',      }))      ElMessage.success(`${methodLabel}瀹屾垚锛屾壘鍒?${parseData.fields.length} 涓緟濉瓧娈礰)    }    progress.value.parse = true    step.value = 'extract'  } catch (e: any) {    errorMsg.value = e.message    ElMessage.error(e.message)    step.value = 'upload'    progress.value.upload = false  }}// 鈹€鈹€ 浠庡巻鍙叉ā鏉胯В鏋愬崰浣嶇 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€async function handleSelectExisting() {  if (!selectedTemplateId.value) {    ElMessage.warning('璇峰厛閫夋嫨涓€涓ā鏉?)    return  }  progress.value.upload = true  progress.value.parse = false  fieldList.value = []  errorMsg.value = ''  try {    const parseRes = await fetch('/api/template/placeholders', {      method: 'POST',      headers: { 'Content-Type': 'application/json' },      body: JSON.stringify({ template_file_id: selectedTemplateId.value })    })    const parseData = (await parseResponseJson(parseRes)) as Record<string, any>    if (!parseRes.ok) throw new Error(parseData.detail || '瑙ｆ瀽鍗犱綅绗﹀け璐?)    if (!parseData.fields || parseData.fields.length === 0) {      ElMessage.warning('妯℃澘涓湭鎵惧埌鍙～鍐欏瓧娈?)      fieldList.value = []    } else {      const methodLabel = parseData.method === 'llm' ? 'AI鏅鸿兘璇嗗埆' : '鍗犱綅绗﹁В鏋?      fieldList.value = parseData.fields.map((f: string) => ({        field: f,        value: '',        status: 'pending' as const,        confidence: 0,        sourceChunk: '',      }))      templateFileId.value = selectedTemplateId.value      ElMessage.success(`${methodLabel}瀹屾垚锛屾壘鍒?${parseData.fields.length} 涓緟濉瓧娈礰)    }    progress.value.upload = true    progress.value.parse = true    step.value = 'extract'  } catch (e: any) {    errorMsg.value = e.message    ElMessage.error(e.message)  }}// 鈹€鈹€ 鍏ㄩ噺鎻愬彇瀛楁鍊?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€async function handleExtractAll() {  if (fieldList.value.length === 0) {    ElMessage.warning('娌℃湁鍙彁鍙栫殑瀛楁')    return  }  if (sourceFileIds.value.length === 0) {    ElMessage.warning('璇疯嚦灏戦€夋嫨涓€涓暟鎹潵婧愭枃妗?)    return  }  loading.value = true  step.value = 'extract'  errorMsg.value = ''  const pending = fieldList.value.filter(f => f.status === 'pending')  const doneMap = new Map(fieldList.value.map(f => [f.field, f]))  for (const item of pending) {    item.status = 'extracting'    try {      // 鐢?extract 鍦烘櫙涓撻棬鍋氬瓧娈靛€兼彁鍙栵紝LLM 鍙繑鍥炵函鍊?      const askRes = await fetch('/api/ask', {        method: 'POST',        headers: { 'Content-Type': 'application/json' },        body: JSON.stringify({          query: `浠庢枃妗ｄ腑鎻愬彇"${item.field}"鐨勫€硷紝鍙緭鍑哄€兼湰韬玚,          file_ids: sourceFileIds.value,          scenario: 'extract'        })      })      const askData = (await parseResponseJson(askRes)) as Record<string, any>      if (askRes.ok && askData.answer) {        // extract 鍦烘櫙涓?LLM 鐩存帴杩斿洖绾€硷紝鍙仛鍩烘湰娓呯悊        const raw = askData.answer          .replace(/^(鍥炵瓟|鍊紎绛旀|鎻愬彇缁撴灉)[锛?]\s*/g, '')  // 闃叉 LLM 浠嶇劧鍔犲墠缂€          .replace(/\n鏉ユ簮[锛?][\s\S]*/g, '')                 // 鍘绘帀鏉ユ簮琛?          .replace(/\[鏂囨。\d+\]/g, '')                        // 鍘绘帀鏂囨。寮曠敤鏍囪          .trim()          .slice(0, 200)        if (raw && raw !== '(鏃?' && raw !== '鏈煡' && raw !== '鏍规嵁鎻愪緵鐨勪俊鎭棤娉曞洖绛旇闂') {          item.value = raw          item.confidence = Math.round((askData.confidence || 0.6) * 100)          item.sourceChunk = askData.sources?.[0]?.content?.slice(0, 60) || ''          item.status = 'success'        } else {          item.value = '(鏈壘鍒?'          item.status = 'warning'          item.confidence = 0        }      } else {        item.value = '(鎻愬彇澶辫触)'        item.status = 'error'        item.confidence = 0      }    } catch {      item.value = '(鎻愬彇澶辫触)'      item.status = 'error'      item.confidence = 0    }  }  loading.value = false  step.value = 'fill'  const ok = fieldList.value.filter(f => f.status === 'success').length  ElMessage.success(`鎻愬彇瀹屾垚锛?{ok}/${fieldList.value.length} 涓瓧娈垫垚鍔焋)}// 鈹€鈹€ 鏅鸿兘鍥炲～锛堢洿鎺ョ敤 source_file_ids锛岃 LLM 鑷姩濉〃锛?鈹€鈹€async function handleSmartFill() {  if (!templateFileId.value) {    ElMessage.warning('缂哄皯妯℃澘鏂囦欢 ID')    return  }  if (sourceFileIds.value.length === 0) {    ElMessage.warning('璇疯嚦灏戦€夋嫨涓€涓暟鎹潵婧愭枃妗?)    return  }  loading.value = true  step.value = 'fill'  errorMsg.value = ''  try {    const res = await fetch('/api/fill', {      method: 'POST',      headers: { 'Content-Type': 'application/json' },      body: JSON.stringify({        template_file_id: templateFileId.value,        source_file_ids: sourceFileIds.value,        max_rows: 10,      })    })    const data = (await parseResponseJson(res)) as Record<string, any>    if (!res.ok) throw new Error(data.detail || '鏅鸿兘鍥炲～澶辫触')    outputFileId.value = data.output_file_id    downloadUrl.value = data.download_url    step.value = 'done'    progress.value.done = true    ElMessage.success('鏅鸿兘鍥炲～鎴愬姛锛佸彲涓嬭浇鏂囨。')  } catch (e: any) {    errorMsg.value = e.message    ElMessage.error('鍥炲～澶辫触锛? + e.message)  } finally {    loading.value = false  }}// 鈹€鈹€ 鎵ц鍥炲～ 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€async function handleFill() {  if (!templateFileId.value) {    ElMessage.warning('缂哄皯妯℃澘鏂囦欢 ID')    return  }  loading.value = true  step.value = 'fill'  errorMsg.value = ''  const answers = fieldList.value    .filter(f => f.status !== 'pending' && f.status !== 'extracting')    .map(f => ({      field_name: f.field,      value: f.value === '(鏈壘鍒?' || f.value === '(鎻愬彇澶辫触)' ? '' : f.value,    }))  try {    const res = await fetch('/api/fill', {      method: 'POST',      headers: { 'Content-Type': 'application/json' },      body: JSON.stringify({        template_file_id: templateFileId.value,        answers,      })    })    const data = (await parseResponseJson(res)) as Record<string, any>    if (!res.ok) throw new Error(data.detail || '鍥炲～澶辫触')    outputFileId.value = data.output_file_id    downloadUrl.value = data.download_url    step.value = 'done'    progress.value.done = true    ElMessage.success('鍥炲～鎴愬姛锛佸彲涓嬭浇鏂囨。')  } catch (e: any) {    errorMsg.value = e.message    ElMessage.error('鍥炲～澶辫触锛? + e.message)  } finally {    loading.value = false  }}// 鈹€鈹€ 涓嬭浇 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€function handleDownload() {  if (downloadUrl.value) {    // downloadUrl 褰㈠ /download/{id}锛屽姞 /api 鍓嶇紑璧?Vite 浠ｇ悊杞彂鍒板悗绔?    const url = downloadUrl.value.startsWith('/api')      ? downloadUrl.value      : '/api' + downloadUrl.value    window.open(url, '_blank')  }}// 鈹€鈹€ 閲嶇疆 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€function handleReset() {  templateFile.value = null  templateFileId.value = ''  selectedTemplateId.value = ''  fieldList.value = []  sourceFileIds.value = []  outputFileId.value = ''  downloadUrl.value = ''  errorMsg.value = ''  step.value = 'upload'  progress.value = { upload: false, parse: false, extract: false, fill: false, done: false }}</script><template>  <div class="space-y-6">    <!-- 椤甸潰鏍囬 -->    <div class="text-xs font-bold tracking-widest text-muted uppercase pb-2.5 border-b border-border-l">      Word / Excel 妯℃澘鑷姩鍥炲～    </div>    <!-- 姝ラ鏉?-->    <div class="flex items-center gap-0 text-xs">      <div v-for="(label, key, i) in { upload:'鈶?涓婁紶妯℃澘', parse:'鈶?瑙ｆ瀽瀛楁', extract:'鈶?鎻愬彇鍊?, fill:'鈶?鍥炲～', done:'鈶?瀹屾垚' }" :key="key"        class="flex items-center gap-1.5 px-3 py-1.5 rounded-full border"        :class="step === key ? 'bg-accent text-white border-accent' : 'bg-white text-muted border-border'">        <span>{{ label }}</span>      </div>    </div>    <!-- 鈹€鈹€ 鈶?涓婁紶妯℃澘 鈹€鈹€ -->    <div class="grid grid-cols-12 gap-6">      <!-- 宸︿晶锛氫笂浼?-->      <div class="col-span-5">        <div class="mb-3 flex items-center gap-4 text-xs">          <label class="flex items-center gap-1.5 cursor-pointer">            <input type="radio" v-model="useExisting" :value="false" class="accent-accent" />            涓婁紶鏂版ā鏉?          </label>          <label v-if="indexedFiles.length > 0" class="flex items-center gap-1.5 cursor-pointer">            <input type="radio" v-model="useExisting" :value="true" class="accent-accent" />            鐢ㄥ巻鍙叉枃浠朵綔妯℃澘          </label>        </div>        <!-- 涓婁紶鏂版ā鏉?-->        <div v-if="!useExisting">          <label class="block text-sm font-medium text-text2 mb-2">涓婁紶 Word / Excel 妯℃澘</label>          <label class="bg-white border-2 border-dashed border-border rounded-lg p-8 flex flex-col items-center justify-center hover:border-accent transition-colors cursor-pointer text-center">            <div class="text-4xl mb-2">馃搫</div>            <div class="text-xs text-text2">鐐瑰嚮鎴栨嫋鎷戒笂浼?/div>            <div class="text-xs text-muted mt-1">.docx / .xlsx</div>            <div v-if="templateFile" class="mt-2 px-2 py-1 bg-accent/10 text-accent text-xs rounded">              {{ templateFile.name }}            </div>            <input type="file" class="hidden" accept=".docx,.xlsx"              @change="(e) => templateFile = (e.target as HTMLInputElement).files?.[0] || null" />          </label>          <button            @click="handleUploadTemplate"            :disabled="!templateFile"            class="mt-3 w-full px-4 py-2 bg-accent text-white font-medium rounded-md hover:bg-blue-600 disabled:opacity-40 transition-colors text-sm"          >            涓婁紶骞惰В鏋愬崰浣嶇 鈫?          </button>        </div>        <!-- 鍘嗗彶妯℃澘 -->        <div v-else>          <label class="block text-sm font-medium text-text2 mb-2">閫夋嫨宸叉湁鏂囨。浣滀负妯℃澘</label>          <select v-model="selectedTemplateId" class="w-full px-3 py-2 bg-white border border-border rounded-md text-sm text-text">            <option value="">-- 閫夋嫨 --</option>            <option v-for="f in templateList" :key="f.file_id" :value="f.file_id">              {{ f.filename }} ({{ f.file_id.slice(0, 8) }})            </option>          </select>          <button            @click="handleSelectExisting"            :disabled="!selectedTemplateId"            class="mt-3 w-full px-4 py-2 bg-accent text-white font-medium rounded-md hover:bg-blue-600 disabled:opacity-40 transition-colors text-sm"          >            瑙ｆ瀽鍗犱綅绗?鈫?          </button>        </div>      </div>      <!-- 鍙充晶锛氬凡瑙ｆ瀽瀛楁棰勮 -->      <div class="col-span-7">        <div v-if="fieldList.length > 0">          <div class="flex items-center justify-between mb-2">            <div class="text-xs font-bold text-muted uppercase tracking-wider">              宸茶瘑鍒緟濉瓧娈碉紙鍏?{{ fieldList.length }} 涓級            </div>            <div class="text-xs text-muted">              瀛楁鍊肩姸鎬侊細              <span class="text-green font-semibold">{{ fieldList.filter(f=>f.status==='success').length }}</span> 鎴愬姛 路              <span class="text-yellow-600 font-semibold">{{ fieldList.filter(f=>f.status==='warning').length }}</span> 鏈壘鍒?路              <span class="text-red font-semibold">{{ fieldList.filter(f=>f.status==='error').length }}</span> 澶辫触            </div>          </div>          <div class="bg-white border border-border rounded-lg overflow-hidden">            <table class="w-full text-xs">              <thead>                <tr class="bg-surface2 border-b border-border">                  <th class="px-3 py-2 text-left font-semibold text-text2 w-8">#</th>                  <th class="px-3 py-2 text-left font-semibold text-text2">鍗犱綅绗?/th>                  <th class="px-3 py-2 text-left font-semibold text-text2">鎻愬彇缁撴灉</th>                  <th class="px-3 py-2 text-left font-semibold text-text2 w-16">鐘舵€?/th>                </tr>              </thead>              <tbody>                <tr v-for="(f, i) in fieldList" :key="i" class="border-b border-border-l last:border-0 hover:bg-surface2">                  <td class="px-3 py-2 text-muted">{{ i + 1 }}</td>                  <td class="px-3 py-2">                    <code class="bg-surface2 px-1.5 py-0.5 rounded text-accent">{{ f.field }}</code>                  </td>                  <td class="px-3 py-2">                    <div v-if="f.status === 'success'" class="flex items-center gap-2">                      <span class="text-text">{{ f.value }}</span>                      <span class="text-xs" :class="getConfColor(f.confidence)">{{ f.confidence }}%</span>                    </div>                    <span v-else-if="f.status === 'extracting'" class="text-accent">鈴?鎻愬彇涓?..</span>                    <span v-else-if="f.status === 'warning'" class="text-yellow-600">鈿?{{ f.value || '(鏈壘鍒?' }}</span>                    <span v-else-if="f.status === 'error'" class="text-red">{{ f.value || '(澶辫触)' }}</span>                    <span v-else class="text-muted">鈼?寰呮彁鍙?/span>                  </td>                  <td class="px-3 py-2">                    <span :class="getStatusColor(f.status)">{{ getStatusIcon(f.status) }}</span>                  </td>                </tr>              </tbody>            </table>          </div>        </div>        <!-- 鏆傛棤瀛楁 -->        <div v-else class="h-full flex items-center justify-center border-2 border-dashed border-border rounded-lg p-8 text-center text-muted text-sm">          <div>            <div class="text-3xl mb-2">馃搵</div>            <div>涓婁紶妯℃澘鍚庤嚜鍔ㄨВ鏋愬崰浣嶇</div>          </div>        </div>      </div>    </div>    <!-- 鈹€鈹€ 鈶?閫夋暟鎹潵婧?鈹€鈹€ -->    <div v-if="fieldList.length > 0">      <div class="text-xs font-bold tracking-widest text-muted uppercase pb-2.5 border-b border-border-l mb-4">        閫夋嫨鏁版嵁鏉ユ簮锛堝凡鍏ュ簱鏂囨。锛?      </div>      <div class="flex flex-wrap gap-2 mb-3">        <label          v-for="f in indexedFiles" :key="f.file_id"          class="flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs cursor-pointer transition-colors"          :class="sourceFileIds.includes(f.file_id)            ? 'bg-accent/10 border-accent text-accent'            : 'bg-white border-border text-text2 hover:border-accent'"        >          <input type="checkbox" :value="f.file_id" v-model="sourceFileIds" class="hidden" />          {{ f.filename }} ({{ f.chunk_count }}鍧?        </label>        <div v-if="indexedFiles.length === 0" class="text-xs text-muted">          鏆傛棤宸插叆搴撴枃妗ｏ紝璇峰厛鍦ㄣ€屼笂浼犮€嶉〉闈㈣В鏋愭枃妗?        </div>      </div>      <div class="text-xs text-muted">        宸查€夛細{{ sourceFileIds.length }} 涓枃妗?|        <button @click="sourceFileIds = indexedFiles.map(f => f.file_id)"          class="text-accent hover:underline ml-1">鍏ㄩ€?/button> |        <button @click="sourceFileIds = []" class="text-accent hover:underline">娓呴櫎</button>      </div>    </div>    <!-- 鈹€鈹€ 鈶?鎻愬彇 & 鍥炲～鎸夐挳 鈹€鈹€ -->    <div v-if="fieldList.length > 0" class="flex gap-3 flex-wrap">      <button        @click="handleExtractAll"        :disabled="loading || sourceFileIds.length === 0"        class="px-5 py-2.5 bg-accent text-white font-medium rounded-md hover:bg-blue-600 disabled:opacity-40 transition-colors"      >        {{ loading ? '鈴?鎻愬彇涓?..' : '馃攳 浠庢枃妗ｄ腑鎻愬彇鍏ㄩ儴瀛楁鍊? }}      </button>      <button        @click="handleSmartFill"        :disabled="loading || sourceFileIds.length === 0"        class="px-5 py-2.5 bg-purple-600 text-white font-medium rounded-md hover:bg-purple-700 disabled:opacity-40 transition-colors"        title="LLM 鑷姩璇诲彇妯℃澘琛ㄥご骞朵粠鏁版嵁婧愭彁鍙栨暟鎹紝鏃犻渶閫愬瓧娈垫彁鍙?      >        {{ loading ? '鈴?鏅鸿兘鍥炲～涓?..' : '馃 鏅鸿兘鍥炲～锛堟帹鑽愶級' }}      </button>      <button        @click="handleFill"        :disabled="loading || !allFieldsReady"        class="px-5 py-2.5 bg-green text-white font-medium rounded-md hover:bg-green-600 disabled:opacity-40 transition-colors"        title="鎵€鏈夊瓧娈垫彁鍙栧畬鎴愬悗鍙洖濉?      >        鉁?鍥炲～妯℃澘骞朵笅杞?      </button>      <button        @click="handleReset"        class="px-4 py-2.5 bg-surface text-text2 font-medium rounded-md border border-border hover:bg-surface2 transition-colors text-sm"      >        閲嶆柊寮€濮?      </button>    </div>    <!-- 鈹€鈹€ 鈶?瀹屾垚 鈹€鈹€ -->    <div v-if="step === 'done'" class="bg-green/5 border border-green/30 rounded-lg p-6 space-y-4">      <div class="flex items-center gap-3">        <span class="text-4xl">馃帀</span>        <div>          <div class="text-base font-bold text-green">鍥炲～瀹屾垚锛?/div>          <div class="text-xs text-muted mt-0.5">鏂囨。宸茬敓鎴愶紝鐐瑰嚮涓嬭浇</div>        </div>      </div>      <div class="bg-white border border-border rounded p-3 space-y-1 text-xs text-text2">        <div>杈撳嚭 ID锛?span class="font-mono text-accent">{{ outputFileId }}</span></div>        <div>濉厖瀛楁锛歿{ fieldList.filter(f=>f.status==='success').length }} / {{ fieldList.length }}</div>      </div>      <div class="flex gap-3">        <button @click="handleDownload"          class="flex-1 px-4 py-3 bg-accent text-white font-medium rounded-md hover:bg-blue-600 transition-colors flex items-center justify-center gap-2">          猬囷笍 涓嬭浇鍥炲～鏂囨。        </button>        <button @click="handleReset"          class="flex-1 px-4 py-3 bg-white text-text2 font-medium rounded-md border border-border hover:bg-surface2 transition-colors">          鏂板缓浠诲姟        </button>      </div>    </div>    <!-- 閿欒鎻愮ず -->    <div v-if="errorMsg" class="bg-red/5 border border-red/30 rounded p-3 text-xs text-red">      {{ errorMsg }}    </div>  </div></template><style scoped></style>
+<script setup lang="ts">
+import { ref, computed, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
+import { parseResponseJson } from '@/utils/parseApiResponse'
+
+// ── 类型定义 ────────────────────────────────────────────────
+interface FileRecord {
+  file_id: string
+  filename: string
+  status: string
+  chunk_count: number
+}
+
+interface FieldItem {
+  field: string
+  value: string
+  status: 'pending' | 'extracting' | 'success' | 'warning' | 'error'
+  confidence: number
+  sourceChunk: string
+}
+
+interface Progress {
+  upload: boolean
+  parse: boolean
+  extract: boolean
+  fill: boolean
+  done: boolean
+}
+
+// ── 状态 ────────────────────────────────────────────────────
+const templateFile = ref<File | null>(null)
+const templateFileId = ref('')
+const templateList = ref<FileRecord[]>([])
+const useExisting = ref(false)
+const selectedTemplateId = ref('')
+
+const fieldList = ref<FieldItem[]>([])           // 自动解析出的字段
+const sourceFileIds = ref<string[]>([])           // 数据来源文件
+const loading = ref(false)
+const step = ref<keyof Progress>('upload')
+
+const progress = ref<Progress>({
+  upload: false,
+  parse: false,
+  extract: false,
+  fill: false,
+  done: false,
+})
+
+const outputFileId = ref('')
+const downloadUrl = ref('')
+const errorMsg = ref('')
+
+// ── 生命周期 ────────────────────────────────────────────────
+onMounted(loadFileList)
+
+// ── 工具函数 ────────────────────────────────────────────────
+const getStatusIcon = (s: string) =>
+  s === 'success' ? '✓' : s === 'extracting' ? '⏳' : s === 'warning' ? '⚠' : s === 'error' ? '✕' : '○'
+
+const getStatusColor = (s: string) =>
+  s === 'success' ? 'text-green' :
+  s === 'extracting' ? 'text-accent' :
+  s === 'warning' ? 'text-yellow-600' :
+  s === 'error' ? 'text-red' : 'text-muted'
+
+const getConfColor = (c: number) =>
+  c >= 90 ? 'text-green' : c >= 75 ? 'text-accent' : c >= 50 ? 'text-yellow-500' : 'text-red'
+
+const indexedFiles = computed(() =>
+  templateList.value.filter(f => f.status === 'indexed')
+)
+
+const selectedFiles = computed(() =>
+  templateList.value.filter(f => sourceFileIds.value.includes(f.file_id))
+)
+
+const allFieldsReady = computed(() =>
+  fieldList.value.length > 0 && fieldList.value.every(f => f.status !== 'pending')
+)
+
+// ── 加载文件列表 ─────────────────────────────────────────────
+async function loadFileList() {
+  try {
+    const res = await fetch('/api/files')
+    const data = (await parseResponseJson(res)) as { files?: FileRecord[] }
+    if (res.ok) templateList.value = data.files || []
+  } catch { /* 静默 */ }
+}
+
+// ── 上传模板并自动解析占位符 ────────────────────────────────
+async function handleUploadTemplate() {
+  if (!templateFile.value) {
+    ElMessage.warning('请先选择 Word 或 Excel 模板文件')
+    return
+  }
+
+  progress.value.upload = true
+  progress.value.parse = false
+  progress.value.extract = false
+  progress.value.fill = false
+  progress.value.done = false
+  step.value = 'parse'
+  fieldList.value = []
+  errorMsg.value = ''
+
+  try {
+    // 1. 上传模板
+    const fd = new FormData()
+    fd.append('file', templateFile.value)
+    const upRes = await fetch('/api/upload', { method: 'POST', body: fd })
+    const upData = (await parseResponseJson(upRes)) as Record<string, any>
+    if (!upRes.ok) throw new Error(upData.detail || '上传失败')
+
+    templateFileId.value = upData.file_id
+    progress.value.upload = true
+
+    // 2. 自动解析占位符
+    const parseRes = await fetch('/api/template/placeholders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template_file_id: templateFileId.value })
+    })
+    const parseData = (await parseResponseJson(parseRes)) as Record<string, any>
+    if (!parseRes.ok) throw new Error(parseData.detail || '解析占位符失败')
+
+    if (!parseData.fields || parseData.fields.length === 0) {
+      ElMessage.warning('模板中未找到可填写字段')
+      fieldList.value = []
+    } else {
+      const methodLabel = parseData.method === 'llm' ? 'AI智能识别' : '占位符解析'
+      fieldList.value = parseData.fields.map((f: string) => ({
+        field: f,
+        value: '',
+        status: 'pending' as const,
+        confidence: 0,
+        sourceChunk: '',
+      }))
+      ElMessage.success(`${methodLabel}完成，找到 ${parseData.fields.length} 个待填字段`)
+    }
+
+    progress.value.parse = true
+    step.value = 'extract'
+
+  } catch (e: any) {
+    errorMsg.value = e.message
+    ElMessage.error(e.message)
+    step.value = 'upload'
+    progress.value.upload = false
+  }
+}
+
+// ── 从历史模板解析占位符 ────────────────────────────────────
+async function handleSelectExisting() {
+  if (!selectedTemplateId.value) {
+    ElMessage.warning('请先选择一个模板')
+    return
+  }
+
+  progress.value.upload = true
+  progress.value.parse = false
+  fieldList.value = []
+  errorMsg.value = ''
+
+  try {
+    const parseRes = await fetch('/api/template/placeholders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template_file_id: selectedTemplateId.value })
+    })
+    const parseData = (await parseResponseJson(parseRes)) as Record<string, any>
+    if (!parseRes.ok) throw new Error(parseData.detail || '解析占位符失败')
+
+    if (!parseData.fields || parseData.fields.length === 0) {
+      ElMessage.warning('模板中未找到可填写字段')
+      fieldList.value = []
+    } else {
+      const methodLabel = parseData.method === 'llm' ? 'AI智能识别' : '占位符解析'
+      fieldList.value = parseData.fields.map((f: string) => ({
+        field: f,
+        value: '',
+        status: 'pending' as const,
+        confidence: 0,
+        sourceChunk: '',
+      }))
+      templateFileId.value = selectedTemplateId.value
+      ElMessage.success(`${methodLabel}完成，找到 ${parseData.fields.length} 个待填字段`)
+    }
+
+    progress.value.upload = true
+    progress.value.parse = true
+    step.value = 'extract'
+
+  } catch (e: any) {
+    errorMsg.value = e.message
+    ElMessage.error(e.message)
+  }
+}
+
+// ── 全量提取字段值 ──────────────────────────────────────────
+async function handleExtractAll() {
+  if (fieldList.value.length === 0) {
+    ElMessage.warning('没有可提取的字段')
+    return
+  }
+  if (sourceFileIds.value.length === 0) {
+    ElMessage.warning('请至少选择一个数据来源文档')
+    return
+  }
+
+  loading.value = true
+  step.value = 'extract'
+  errorMsg.value = ''
+
+  const pending = fieldList.value.filter(f => f.status === 'pending')
+  const doneMap = new Map(fieldList.value.map(f => [f.field, f]))
+
+  for (const item of pending) {
+    item.status = 'extracting'
+
+    try {
+      // 用 extract 场景专门做字段值提取，LLM 只返回纯值
+      const askRes = await fetch('/api/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: `从文档中提取"${item.field}"的值，只输出值本身`,
+          file_ids: sourceFileIds.value,
+          scenario: 'extract'
+        })
+      })
+      const askData = (await parseResponseJson(askRes)) as Record<string, any>
+
+      if (askRes.ok && askData.answer) {
+        // extract 场景下 LLM 直接返回纯值，只做基本清理
+        const raw = askData.answer
+          .replace(/^(回答|值|答案|提取结果)[：:]\s*/g, '')  // 防止 LLM 仍然加前缀
+          .replace(/\n来源[：:][\s\S]*/g, '')                 // 去掉来源行
+          .replace(/\[文档\d+\]/g, '')                        // 去掉文档引用标记
+          .trim()
+          .slice(0, 200)
+
+        if (raw && raw !== '(无)' && raw !== '未知' && raw !== '根据提供的信息无法回答该问题') {
+          item.value = raw
+          item.confidence = Math.round((askData.confidence || 0.6) * 100)
+          item.sourceChunk = askData.sources?.[0]?.content?.slice(0, 60) || ''
+          item.status = 'success'
+        } else {
+          item.value = '(未找到)'
+          item.status = 'warning'
+          item.confidence = 0
+        }
+      } else {
+        item.value = '(提取失败)'
+        item.status = 'error'
+        item.confidence = 0
+      }
+    } catch {
+      item.value = '(提取失败)'
+      item.status = 'error'
+      item.confidence = 0
+    }
+  }
+
+  loading.value = false
+  step.value = 'fill'
+  const ok = fieldList.value.filter(f => f.status === 'success').length
+  ElMessage.success(`提取完成：${ok}/${fieldList.value.length} 个字段成功`)
+}
+
+// ── 智能回填（直接用 source_file_ids，让 LLM 自动填表） ──
+async function handleSmartFill() {
+  if (!templateFileId.value) {
+    ElMessage.warning('缺少模板文件 ID')
+    return
+  }
+  if (sourceFileIds.value.length === 0) {
+    ElMessage.warning('请至少选择一个数据来源文档')
+    return
+  }
+
+  loading.value = true
+  step.value = 'fill'
+  errorMsg.value = ''
+
+  try {
+    const res = await fetch('/api/fill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        template_file_id: templateFileId.value,
+        source_file_ids: sourceFileIds.value,
+        max_rows: 10,
+      })
+    })
+    const data = (await parseResponseJson(res)) as Record<string, any>
+    if (!res.ok) throw new Error(data.detail || '智能回填失败')
+
+    outputFileId.value = data.output_file_id
+    downloadUrl.value = data.download_url
+    step.value = 'done'
+    progress.value.done = true
+    ElMessage.success('智能回填成功！可下载文档')
+  } catch (e: any) {
+    errorMsg.value = e.message
+    ElMessage.error('回填失败：' + e.message)
+  } finally {
+    loading.value = false
+  }
+}
+
+// ── 执行回填 ────────────────────────────────────────────────
+async function handleFill() {
+  if (!templateFileId.value) {
+    ElMessage.warning('缺少模板文件 ID')
+    return
+  }
+
+  loading.value = true
+  step.value = 'fill'
+  errorMsg.value = ''
+
+  const answers = fieldList.value
+    .filter(f => f.status !== 'pending' && f.status !== 'extracting')
+    .map(f => ({
+      field_name: f.field,
+      value: f.value === '(未找到)' || f.value === '(提取失败)' ? '' : f.value,
+    }))
+
+  try {
+    const res = await fetch('/api/fill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        template_file_id: templateFileId.value,
+        answers,
+      })
+    })
+    const data = (await parseResponseJson(res)) as Record<string, any>
+    if (!res.ok) throw new Error(data.detail || '回填失败')
+
+    outputFileId.value = data.output_file_id
+    downloadUrl.value = data.download_url
+    step.value = 'done'
+    progress.value.done = true
+    ElMessage.success('回填成功！可下载文档')
+  } catch (e: any) {
+    errorMsg.value = e.message
+    ElMessage.error('回填失败：' + e.message)
+  } finally {
+    loading.value = false
+  }
+}
+
+// ── 下载 ─────────────────────────────────────────────────────
+function handleDownload() {
+  if (downloadUrl.value) {
+    // downloadUrl 形如 /download/{id}，加 /api 前缀走 Vite 代理转发到后端
+    const url = downloadUrl.value.startsWith('/api')
+      ? downloadUrl.value
+      : '/api' + downloadUrl.value
+    window.open(url, '_blank')
+  }
+}
+
+// ── 重置 ─────────────────────────────────────────────────────
+function handleReset() {
+  templateFile.value = null
+  templateFileId.value = ''
+  selectedTemplateId.value = ''
+  fieldList.value = []
+  sourceFileIds.value = []
+  outputFileId.value = ''
+  downloadUrl.value = ''
+  errorMsg.value = ''
+  step.value = 'upload'
+  progress.value = { upload: false, parse: false, extract: false, fill: false, done: false }
+}
+</script>
+
+<template>
+  <div class="space-y-6">
+
+    <!-- 页面标题 -->
+    <div class="text-xs font-bold tracking-widest text-muted uppercase pb-2.5 border-b border-border-l">
+      Word / Excel 模板自动回填
+    </div>
+
+    <!-- 步骤条 -->
+    <div class="flex items-center gap-0 text-xs">
+      <div v-for="(label, key, i) in { upload:'① 上传模板', parse:'② 解析字段', extract:'③ 提取值', fill:'④ 回填', done:'⑤ 完成' }" :key="key"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-full border"
+        :class="step === key ? 'bg-accent text-white border-accent' : 'bg-white text-muted border-border'">
+        <span>{{ label }}</span>
+      </div>
+    </div>
+
+    <!-- ── ① 上传模板 ── -->
+    <div class="grid grid-cols-12 gap-6">
+      <!-- 左侧：上传 -->
+      <div class="col-span-5">
+        <div class="mb-3 flex items-center gap-4 text-xs">
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input type="radio" v-model="useExisting" :value="false" class="accent-accent" />
+            上传新模板
+          </label>
+          <label v-if="indexedFiles.length > 0" class="flex items-center gap-1.5 cursor-pointer">
+            <input type="radio" v-model="useExisting" :value="true" class="accent-accent" />
+            用历史文件作模板
+          </label>
+        </div>
+
+        <!-- 上传新模板 -->
+        <div v-if="!useExisting">
+          <label class="block text-sm font-medium text-text2 mb-2">上传 Word / Excel 模板</label>
+          <label class="bg-white border-2 border-dashed border-border rounded-lg p-8 flex flex-col items-center justify-center hover:border-accent transition-colors cursor-pointer text-center">
+            <div class="text-4xl mb-2">📄</div>
+            <div class="text-xs text-text2">点击或拖拽上传</div>
+            <div class="text-xs text-muted mt-1">.docx / .xlsx</div>
+            <div v-if="templateFile" class="mt-2 px-2 py-1 bg-accent/10 text-accent text-xs rounded">
+              {{ templateFile.name }}
+            </div>
+            <input type="file" class="hidden" accept=".docx,.xlsx"
+              @change="(e) => templateFile = (e.target as HTMLInputElement).files?.[0] || null" />
+          </label>
+          <button
+            @click="handleUploadTemplate"
+            :disabled="!templateFile"
+            class="mt-3 w-full px-4 py-2 bg-accent text-white font-medium rounded-md hover:bg-blue-600 disabled:opacity-40 transition-colors text-sm"
+          >
+            上传并解析占位符 →
+          </button>
+        </div>
+
+        <!-- 历史模板 -->
+        <div v-else>
+          <label class="block text-sm font-medium text-text2 mb-2">选择已有文档作为模板</label>
+          <select v-model="selectedTemplateId" class="w-full px-3 py-2 bg-white border border-border rounded-md text-sm text-text">
+            <option value="">-- 选择 --</option>
+            <option v-for="f in templateList" :key="f.file_id" :value="f.file_id">
+              {{ f.filename }} ({{ f.file_id.slice(0, 8) }})
+            </option>
+          </select>
+          <button
+            @click="handleSelectExisting"
+            :disabled="!selectedTemplateId"
+            class="mt-3 w-full px-4 py-2 bg-accent text-white font-medium rounded-md hover:bg-blue-600 disabled:opacity-40 transition-colors text-sm"
+          >
+            解析占位符 →
+          </button>
+        </div>
+      </div>
+
+      <!-- 右侧：已解析字段预览 -->
+      <div class="col-span-7">
+        <div v-if="fieldList.length > 0">
+          <div class="flex items-center justify-between mb-2">
+            <div class="text-xs font-bold text-muted uppercase tracking-wider">
+              已识别待填字段（共 {{ fieldList.length }} 个）
+            </div>
+            <div class="text-xs text-muted">
+              字段值状态：
+              <span class="text-green font-semibold">{{ fieldList.filter(f=>f.status==='success').length }}</span> 成功 ·
+              <span class="text-yellow-600 font-semibold">{{ fieldList.filter(f=>f.status==='warning').length }}</span> 未找到 ·
+              <span class="text-red font-semibold">{{ fieldList.filter(f=>f.status==='error').length }}</span> 失败
+            </div>
+          </div>
+
+          <div class="bg-white border border-border rounded-lg overflow-hidden">
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="bg-surface2 border-b border-border">
+                  <th class="px-3 py-2 text-left font-semibold text-text2 w-8">#</th>
+                  <th class="px-3 py-2 text-left font-semibold text-text2">占位符</th>
+                  <th class="px-3 py-2 text-left font-semibold text-text2">提取结果</th>
+                  <th class="px-3 py-2 text-left font-semibold text-text2 w-16">状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(f, i) in fieldList" :key="i" class="border-b border-border-l last:border-0 hover:bg-surface2">
+                  <td class="px-3 py-2 text-muted">{{ i + 1 }}</td>
+                  <td class="px-3 py-2">
+                    <code class="bg-surface2 px-1.5 py-0.5 rounded text-accent">{{ f.field }}</code>
+                  </td>
+                  <td class="px-3 py-2">
+                    <div v-if="f.status === 'success'" class="flex items-center gap-2">
+                      <span class="text-text">{{ f.value }}</span>
+                      <span class="text-xs" :class="getConfColor(f.confidence)">{{ f.confidence }}%</span>
+                    </div>
+                    <span v-else-if="f.status === 'extracting'" class="text-accent">⏳ 提取中...</span>
+                    <span v-else-if="f.status === 'warning'" class="text-yellow-600">⚠ {{ f.value || '(未找到)' }}</span>
+                    <span v-else-if="f.status === 'error'" class="text-red">{{ f.value || '(失败)' }}</span>
+                    <span v-else class="text-muted">○ 待提取</span>
+                  </td>
+                  <td class="px-3 py-2">
+                    <span :class="getStatusColor(f.status)">{{ getStatusIcon(f.status) }}</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 暂无字段 -->
+        <div v-else class="h-full flex items-center justify-center border-2 border-dashed border-border rounded-lg p-8 text-center text-muted text-sm">
+          <div>
+            <div class="text-3xl mb-2">📋</div>
+            <div>上传模板后自动解析占位符</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── ② 选数据来源 ── -->
+    <div v-if="fieldList.length > 0">
+      <div class="text-xs font-bold tracking-widest text-muted uppercase pb-2.5 border-b border-border-l mb-4">
+        选择数据来源（已入库文档）
+      </div>
+      <div class="flex flex-wrap gap-2 mb-3">
+        <label
+          v-for="f in indexedFiles" :key="f.file_id"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs cursor-pointer transition-colors"
+          :class="sourceFileIds.includes(f.file_id)
+            ? 'bg-accent/10 border-accent text-accent'
+            : 'bg-white border-border text-text2 hover:border-accent'"
+        >
+          <input type="checkbox" :value="f.file_id" v-model="sourceFileIds" class="hidden" />
+          {{ f.filename }} ({{ f.chunk_count }}块)
+        </label>
+        <div v-if="indexedFiles.length === 0" class="text-xs text-muted">
+          暂无已入库文档，请先在「上传」页面解析文档
+        </div>
+      </div>
+      <div class="text-xs text-muted">
+        已选：{{ sourceFileIds.length }} 个文档 |
+        <button @click="sourceFileIds = indexedFiles.map(f => f.file_id)"
+          class="text-accent hover:underline ml-1">全选</button> |
+        <button @click="sourceFileIds = []" class="text-accent hover:underline">清除</button>
+      </div>
+    </div>
+
+    <!-- ── ③ 提取 & 回填按钮 ── -->
+    <div v-if="fieldList.length > 0" class="flex gap-3 flex-wrap">
+      <button
+        @click="handleExtractAll"
+        :disabled="loading || sourceFileIds.length === 0"
+        class="px-5 py-2.5 bg-accent text-white font-medium rounded-md hover:bg-blue-600 disabled:opacity-40 transition-colors"
+      >
+        {{ loading ? '⏳ 提取中...' : '🔍 从文档中提取全部字段值' }}
+      </button>
+
+      <button
+        @click="handleSmartFill"
+        :disabled="loading || sourceFileIds.length === 0"
+        class="px-5 py-2.5 bg-purple-600 text-white font-medium rounded-md hover:bg-purple-700 disabled:opacity-40 transition-colors"
+        title="LLM 自动读取模板表头并从数据源提取数据，无需逐字段提取"
+      >
+        {{ loading ? '⏳ 智能回填中...' : '🤖 智能回填（推荐）' }}
+      </button>
+
+      <button
+        @click="handleFill"
+        :disabled="loading || !allFieldsReady"
+        class="px-5 py-2.5 bg-green text-white font-medium rounded-md hover:bg-green-600 disabled:opacity-40 transition-colors"
+        title="所有字段提取完成后可回填"
+      >
+        ✓ 回填模板并下载
+      </button>
+
+      <button
+        @click="handleReset"
+        class="px-4 py-2.5 bg-surface text-text2 font-medium rounded-md border border-border hover:bg-surface2 transition-colors text-sm"
+      >
+        重新开始
+      </button>
+    </div>
+
+    <!-- ── ④ 完成 ── -->
+    <div v-if="step === 'done'" class="bg-green/5 border border-green/30 rounded-lg p-6 space-y-4">
+      <div class="flex items-center gap-3">
+        <span class="text-4xl">🎉</span>
+        <div>
+          <div class="text-base font-bold text-green">回填完成！</div>
+          <div class="text-xs text-muted mt-0.5">文档已生成，点击下载</div>
+        </div>
+      </div>
+      <div class="bg-white border border-border rounded p-3 space-y-1 text-xs text-text2">
+        <div>输出 ID：<span class="font-mono text-accent">{{ outputFileId }}</span></div>
+        <div>填充字段：{{ fieldList.filter(f=>f.status==='success').length }} / {{ fieldList.length }}</div>
+      </div>
+      <div class="flex gap-3">
+        <button @click="handleDownload"
+          class="flex-1 px-4 py-3 bg-accent text-white font-medium rounded-md hover:bg-blue-600 transition-colors flex items-center justify-center gap-2">
+          ⬇️ 下载回填文档
+        </button>
+        <button @click="handleReset"
+          class="flex-1 px-4 py-3 bg-white text-text2 font-medium rounded-md border border-border hover:bg-surface2 transition-colors">
+          新建任务
+        </button>
+      </div>
+    </div>
+
+    <!-- 错误提示 -->
+    <div v-if="errorMsg" class="bg-red/5 border border-red/30 rounded p-3 text-xs text-red">
+      {{ errorMsg }}
+    </div>
+
+  </div>
+</template>
+
+<style scoped>
+</style>

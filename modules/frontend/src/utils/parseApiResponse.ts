@@ -1,1 +1,25 @@
-﻿/** * 灏?fetch 鐨?Response 鎸?JSON 瑙ｆ瀽銆? * 閬垮厤鍚庣/浠ｇ悊杩斿洖绌?body 鏃?response.json() 鎶涘嚭 * "Unexpected end of JSON input"銆? */export function parseJsonFromText(text: string, status: number): unknown {  const t = (text ?? '').trim()  if (!t) {    throw new Error(      `鏈嶅姟绔繑鍥炵┖鍝嶅簲 (HTTP ${status})銆傝纭宸插湪椤圭洰鏍圭洰褰曞惎鍔ㄥ悗绔紙python main.py锛夛紝涓?http://localhost:8000 鍙闂€俙    )  }  try {    return JSON.parse(t)  } catch {    throw new Error(      `鍝嶅簲涓嶆槸鍚堟硶 JSON (HTTP ${status}): ${t.slice(0, 160)}${t.length > 160 ? '鈥? : ''}`    )  }}export async function parseResponseJson(res: Response): Promise<unknown> {  const text = await res.text()  return parseJsonFromText(text, res.status)}
+/**
+ * 将 fetch 的 Response 按 JSON 解析。
+ * 避免后端/代理返回空 body 时 response.json() 抛出
+ * "Unexpected end of JSON input"。
+ */
+export function parseJsonFromText(text: string, status: number): unknown {
+  const t = (text ?? '').trim()
+  if (!t) {
+    throw new Error(
+      `服务端返回空响应 (HTTP ${status})。请确认已在项目根目录启动后端（python main.py），且 http://localhost:8000 可访问。`
+    )
+  }
+  try {
+    return JSON.parse(t)
+  } catch {
+    throw new Error(
+      `响应不是合法 JSON (HTTP ${status}): ${t.slice(0, 160)}${t.length > 160 ? '…' : ''}`
+    )
+  }
+}
+
+export async function parseResponseJson(res: Response): Promise<unknown> {
+  const text = await res.text()
+  return parseJsonFromText(text, res.status)
+}

@@ -1,1 +1,35 @@
-﻿import { defineConfig } from 'vite'import vue from '@vitejs/plugin-vue'import { fileURLToPath } from 'node:url'import AutoImport from 'unplugin-auto-import/vite'import Components from 'unplugin-vue-components/vite'import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'export default defineConfig({  plugins: [    vue(),    AutoImport({      resolvers: [ElementPlusResolver()],      imports: ['vue', 'vue-router', 'pinia'],    }),    Components({      resolvers: [ElementPlusResolver()],    }),  ],  resolve: {    alias: {      '@': fileURLToPath(new URL('./src', import.meta.url)),    },  },  server: {    port: 5173,    proxy: {      '/api': {        target: 'http://localhost:8000',        changeOrigin: true,        rewrite: (path) => path.replace(/^\/api/, ''),        // 涓嶈鏀瑰啓 Content-Type锛氱┖鍝嶅簲/502 鏃跺己琛屾爣鎴?JSON 浼氳瀵煎墠绔?parse      },    },  },})
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+import { fileURLToPath } from 'node:url'
+import AutoImport from 'unplugin-auto-import/vite'
+import Components from 'unplugin-vue-components/vite'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
+
+export default defineConfig({
+  plugins: [
+    vue(),
+    AutoImport({
+      resolvers: [ElementPlusResolver()],
+      imports: ['vue', 'vue-router', 'pinia'],
+    }),
+    Components({
+      resolvers: [ElementPlusResolver()],
+    }),
+  ],
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+    },
+  },
+  server: {
+    port: 5173,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+        // 不要改写 Content-Type：空响应/502 时强行标成 JSON 会误导前端 parse
+      },
+    },
+  },
+})

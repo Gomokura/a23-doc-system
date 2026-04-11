@@ -1,1 +1,1099 @@
-﻿"""娣峰悎妫€绱笌闂瓟妯″潡 - 璐熻矗浜? 鎴愬憳3鍑芥暟绛惧悕宸查攣瀹氾紝涓嶅緱鏇存敼"""import concurrent.futuresimport copyimport hashlibimport reimport timefrom typing import Optional, Tuple, Dict, Listimport jiebaimport numpy as npfrom loguru import loggerfrom openai import OpenAIimport bm25sfrom sentence_transformers import CrossEncoderfrom config import settingsfrom modules.retriever.indexer import (    get_bm25_records,    get_collection,    _get_embed_model,)# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# ReRanker 閰嶇疆# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?RERANKER_TOP_K = 5# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# 涓枃鍒嗚瘝閰嶇疆# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?STOPWORDS = set([    "鐨?, "浜?, "鍦?, "鏄?, "鎴?, "鏈?, "鍜?, "灏?, "涓?, "浜?, "閮?, "涓€", "涓€涓?,    "涓?, "涔?, "寰?, "鍒?, "璇?, "瑕?, "鍘?, "浣?, "浼?, "鐫€", "娌℃湁", "鐪?, "濂?,    "鑷繁", "杩?, "閭?, "閲?, "涓?, "浠€涔?, "鍙互", "杩欎釜", "閭ｄ釜", "浣嗘槸", "杩樻槸",    "濡傛灉", "鍥犱负", "鎵€浠?, "浣嗘槸", "鑰?, "涓?, "鍙?, "鎴?, "绛?, "浜?, "浠?, "浠?,    "鍙?, "鍏?, "琚?, "鐢?, "瀵?, "灏?, "鎶?, "鍚?, "缁?, "鐢?, "閫氳繃", "杩涜",    "銆?, "锛?, "锛?, "锛?, "銆?, "\"", "鈥?, "鈥?, "鈥?, "鈥?, "锛?, "锛?, "锛?, "锛?,    "銆?, "銆?, "[", "]", "{", "}", "/", "\\", "-", "_", "+", "=", "*", "#",    "@", "$", "%", "^", "&", "~", "`", "<", ">", "|", "\n", "\t", " ", "  ",])def tokenize_chinese(text: str, remove_stopwords: bool = True) -> list:    if not text:        return []    tokens = list(jieba.cut(text, cut_all=False))    if remove_stopwords:        tokens = [t.strip() for t in tokens if t.strip() and t.strip() not in STOPWORDS]    else:        tokens = [t.strip() for t in tokens if t.strip()]    return tokensdef _normalize_scores(scores: list) -> list:    """Min-Max 褰掍竴鍖栧緱鍒嗗埌 [0, 1]"""    if not scores:        return []    min_s, max_s = min(scores), max(scores)    if max_s == min_s:        return [1.0] * len(scores)    return [(s - min_s) / (max_s - min_s) for s in scores]# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# 鑷€傚簲鏉冮噸閰嶇疆# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?def get_adaptive_weights(query: str) -> Tuple[float, float]:    tokens = tokenize_chinese(query, remove_stopwords=False)    token_count = len(tokens)    threshold = getattr(settings, "query_token_threshold", 5)    wv_short = getattr(settings, "weight_vector_short", 0.4)    wb_short = getattr(settings, "weight_bm25_short", 0.6)    wv_long = getattr(settings, "weight_vector_long", 0.7)    wb_long = getattr(settings, "weight_bm25_long", 0.3)    if token_count > threshold:        weight_vector = wv_long        weight_bm25 = wb_long        logger.info(f"鑷€傚簲鏉冮噸 [闀挎煡璇?{token_count} 璇峕: vector={weight_vector}, bm25={weight_bm25}")    else:        weight_vector = wv_short        weight_bm25 = wb_short        logger.info(f"鑷€傚簲鏉冮噸 [鐭煡璇?{token_count} 璇峕: vector={weight_vector}, bm25={weight_bm25}")    return weight_vector, weight_bm25# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# CrossEncoder ReRanker# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?_reranker_model: Optional[CrossEncoder] = Nonedef _get_reranker() -> CrossEncoder:    global _reranker_model    if _reranker_model is None:        model_name = getattr(settings, "reranker_model", None) or "Qwen/Qwen3-Reranker-0.6B"        logger.info(f"鍔犺浇 ReRanker 妯″瀷: {model_name}")        _reranker_model = CrossEncoder(model_name)    return _reranker_modeldef rerank_chunks(query: str, chunks: list, top_k: int = None) -> list:    if not chunks:        return []    top_k = top_k or getattr(settings, "reranker_top_k", None) or RERANKER_TOP_K    if not getattr(settings, "reranker_enabled", False):        logger.debug("ReRanker 鏈惎鐢紝杩斿洖鍘熷鎺掑簭")        return chunks[:top_k]    if len(chunks) <= top_k:        return chunks    try:        reranker = _get_reranker()        pairs = [(query, chunk.get("content", "")) for chunk in chunks]        scores = reranker.predict(pairs)        for i, chunk in enumerate(chunks):            chunk["rerank_score"] = float(scores[i])        reranked = sorted(chunks, key=lambda x: x["rerank_score"], reverse=True)        logger.info(f"ReRanker 瀹屾垚: {len(chunks)} 鈫?{top_k} 鏉★紝寰楀垎鑼冨洿 [{min(scores):.3f}, {max(scores):.3f}]")        return reranked[:top_k]    except Exception as e:        logger.warning(f"ReRanker 澶辫触: {e}锛岃繑鍥炲師濮嬫帓搴?)        return chunks[:top_k]def _normalize_answer_text(raw: str) -> str:    """    瑙ｆ瀽銆屽洖绛?鈥︽潵婧?鈥︺€嶆牸寮忥紝骞跺墧闄ゆā鍨嬭绮樿创鐨勬彁绀鸿瘝璇彞锛坧rompt 娓楁紡锛夈€?    """    if not raw:        return raw    text = raw.strip()    for marker in ("鍥炵瓟:", "鍥炵瓟锛?):        if marker in text:            rest = text.split(marker, 1)[1]            for stop in ("\n鏉ユ簮:", "\n鏉ユ簮锛?, "鏉ユ簮:", "鏉ユ簮锛?):                if stop in rest:                    rest = rest.split(stop, 1)[0]            text = rest.strip()            break    leak_prefixes = (        "## 鍥炵瓟瑕佹眰",        "## 鍥炵瓟鏍煎紡",        "## 鍙傝€冩枃妗?,        "銆愯仛鍚?缁熻绫婚棶棰樸€?,        "1. 鍩轰簬鍙傝€冩枃妗?,        "2. 濡傛灉鏂囨。涓病",        "2. 浠呭綋鍙傝€冩枃妗?,        "3. 鍥炵瓟瑕佸噯纭?,        "4. 銆愯仛鍚?,        "5. 銆愭垚缁?,        "9. 銆愭垚缁?,        "9. 銆愭垚缁?鎺掑悕琛ㄣ€?,        "8. 濡傛灉娑夊強",        "10. 銆愯瘎浠?,        "11. 銆愭寚浠ｆ暣浠芥潗鏂欍€?,        "6. 涓ョ鎶婃湰鎻愮ず",        "7. 鍙潰鍚戞渶缁堢敤鎴?,    )    lines_out: List[str] = []    for line in text.splitlines():        ls = line.strip()        if any(ls.startswith(p) for p in leak_prefixes):            continue        if ls.startswith("鍥炵瓟鏍煎紡") or ls in ("鏉ユ簮:", "鏉ユ簮锛?):            continue        lines_out.append(line)    cleaned = "\n".join(lines_out).strip()    return cleaned if cleaned else raw.strip()def _build_prompt(query: str, chunks: list, scenario: str = "default") -> str:    CHUNK_MAX_CHARS = 3000    CONTEXT_MAX_CHARS = 8000    # 鈿狅笍 M3-005 淇: 鍙ュ瓙杈圭晫鍒囧壊鍑芥暟锛岄伩鍏嶅湪鍙ュ瓙涓棿鎴柇    def _truncate_at_sentence(text: str, max_chars: int) -> str:        """鍦?max_chars 澶勬垨涔嬪墠鏈€杩戠殑鍙ュ瓙杈圭晫锛堛€傦紒锛燂紱\n锛夊鎴柇"""        if len(text) <= max_chars:            return text        # 鍚戝墠鏌ユ壘鏈€鍚庝竴涓彞瀛愯竟鐣?        # 鏍囩偣浼樺厛椤哄簭锛歕n锛堟钀斤級銆併€傦紒锛燂紱锛堝彞瀛愶級        for sep in ["\n\n", "銆俓n", "锛乗n", "锛焅n", "锛沑n", "\n"]:            # 鍦?[max_chars - 50, max_chars] 鑼冨洿鍐呮壘鏈€杩戠殑杈圭晫            search_start = max(0, max_chars - 100)            candidate = text.rfind(sep, search_start, max_chars)            if candidate != -1:                # 淇濈暀杈圭晫鏍囩偣锛堟钀藉垎闅旂闇€瑕佺壒娈婂鐞嗭級                if sep == "\n\n":                    return text[:candidate + 2]                elif sep == "\n":                    return text[:candidate + 1]                else:                    return text[:candidate + len(sep)]        # 娌℃湁鎵惧埌鍙ュ瓙杈圭晫锛岀洿鎺ュ湪 max_chars 澶勬埅鏂紙鏈€鍚庢墜娈碉級        return text[:max_chars] + "鈥?    parts = []    total = 0    seen_files = []    for i, c in enumerate(chunks):        content = (c.get("content") or "").strip()        if not content:            continue        # 鈿狅笍 M3-005 淇: 鍦ㄥ彞瀛愯竟鐣屽鎴柇锛岃€岄潪绠€鍗曞瓧绗︽埅鏂?        content = _truncate_at_sentence(content, CHUNK_MAX_CHARS)        # 鐢ㄧ湡瀹炴枃浠跺悕浣滄爣绛撅紝鑰屼笉鏄?[鏂囨。N]        source_file = c.get("source_file", "")        filename = c.get("filename") or source_file.replace("\\", "/").split("/")[-1] or f"鏂囨。{i+1}"        if filename not in seen_files:            seen_files.append(filename)        seg = f"銆恵filename}銆慭n{content}"        seg_len = len(seg) + 2        # 鈿狅笍 M3-005 淇: 鍦ㄦ坊鍔犲墠鍒ゆ柇鏄惁婧㈠嚭锛岄伩鍏嶆坊鍔犲悗鎵嶅彂鐜版孩鍑?        if total + seg_len > CONTEXT_MAX_CHARS:            # 灏濊瘯瀵瑰綋鍓?chunk 鍦ㄥ彞瀛愯竟鐣屽鎴彇鍓╀綑绌洪棿            remaining = CONTEXT_MAX_CHARS - total - 2            if remaining > 50:  # 鍓╀綑绌洪棿瓒冲鏀剧疆涓€涓彞瀛?                truncated_seg = f"銆恵filename}銆慭n{_truncate_at_sentence(content, remaining)}"                parts.append(truncated_seg)            break  # 绌洪棿涓嶈冻锛屼笉鍐嶆坊鍔犳洿澶?chunk        parts.append(seg)        total += seg_len    context = "\n\n".join(parts)    # 鏉ユ簮鍒楄〃鐢ㄧ湡瀹炴枃浠跺悕    source_names = "銆?.join(f"銆恵fn}銆? for fn in seen_files) if seen_files else "鏈煡鏂囦欢"    if scenario == "extract":        return f"""浣犳槸涓€涓枃妗ｅ瓧娈垫彁鍙栧姪鎵嬨€傝浠庝互涓嬫枃妗ｅ唴瀹逛腑鎻愬彇鎸囧畾瀛楁鐨勫€笺€?## 鏂囨。鍐呭{context}## 鎻愬彇浠诲姟{query}## 涓ユ牸瑕佹眰1. 鍙緭鍑烘彁鍙栧埌鐨勫叿浣撳€硷紝涓嶈浠讳綍瑙ｉ噴銆佸墠缂€鎴栨潵婧愯鏄?2. 濡傛灉鏂囨。涓‘瀹炴病鏈夎瀛楁鐨勫€硷紝鍙緭鍑猴細(鏃?3. 涓嶈杈撳嚭"鍥炵瓟:"銆?鍊?"銆?鏉ユ簮:"绛夊墠缂€4. 涓嶈缂栭€狅紝鍙粠鏂囨。涓彁鍙?鐩存帴杈撳嚭鍊硷細"""    scenario_prompts = {        "contract": "8. 濡傛灉娑夊強鍚堝悓鏉℃锛岃閲嶇偣璇嗗埆锛氬悎鍚岄噾棰濄€佺敳涔欏弻鏂广€佷粯娆炬柟寮忋€佽繚绾﹁矗浠汇€佹湁鏁堟湡銆?,        "report": "8. 濡傛灉娑夊強鎶ヨ〃鏁版嵁锛岃杩涜鏁版嵁瀵规瘮銆佽秼鍔挎弿杩帮紝娉ㄦ槑璁￠噺鍗曚綅銆?,        "regulation": "8. 濡傛灉娑夊強娉曡鏉℃枃锛岃寮曠敤鐩稿叧鏉℃锛岃鏄庨€傜敤鑼冨洿鍜屾椂鏁堟€с€?,    }    extra_requirement = scenario_prompts.get(scenario, "")    # PDF 琛ㄦ牸缁忕函鏂囨湰鎻愬彇鍚庡父涓㈠垪瀵归綈锛屾槗鎶娿€屽姞鍒嗐€嶇瓑灏忔暟瀛楀綋鎴愭€诲垎锛涙鎷被闂涔熶細鐬庣紪浜烘暟/鏋佸€?    table_score_hint = ""    if re.search(        r"鏈€楂榺鏈€浣巪鏋佸€紎鎺掑悕|鎴愮哗|鍒嗘暟|澶氬皯鍒唡鎬诲垎|缁煎悎|"        r"鏈変粈涔堜俊鎭瘄閮芥湁浠€涔坾鍖呭惈浠€涔坾涓昏鍐呭|姒傛嫭|鎬荤粨|浠嬬粛涓媩閲岃竟|閲岄潰|鏈夊摢浜?,        query,    ):        table_score_hint = (            "\n9. 銆愭垚缁?鎺掑悕琛ㄣ€戣嫢鍙傝€冨唴瀹瑰儚瀛︾敓鎴愮哗鎴栨帹鍏嶆帓鍚嶈〃锛?            "缁煎悎鎴愮哗澶氫负绾?3锝? 鐨勫皬鏁帮紱鍚屼竴琛岄噷鏇村皬鐨?0.xx 甯镐负銆屽姞鍒嗐€嶇瓑鍒楋紝**缁濅笉鏄?*缁煎悎鎴愮哗鐨勬渶浣庡垎锛?            "涓嶈鎶?0.1銆?.05 绛夎鎴愩€屾渶浣庡垎銆嶃€?            "闂渶楂?鏈€浣庡垎鏃跺彧瀵广€岀患鍚堟垚缁┿€嶄竴鍒楀彇鏋佸€笺€?            "鎬讳汉鏁般€佹渶楂樺垎銆佹渶浣庡垎銆佸悕娆¤寖鍥寸瓑鏁板瓧锛?*浠呭綋鍙傝€冪墖娈甸噷鑳芥槑纭牳瀵规椂鍐嶅啓**锛?            "鑻ョ墖娈靛彧鏄〃鏍肩殑涓€閮ㄥ垎銆佹湭鍐欐€讳汉鏁帮紝**绂佹缂栭€?*銆屽叡 N 浜恒€嶏紝搴旇鏄庛€屽綋鍓嶅弬鑰冧粎涓烘帓鍚嶈〃灞€閮紝鏃犳硶浠庣墖娈靛噯纭粺璁℃€讳汉鏁版垨鍏ㄨ〃鏋佸€笺€嶃€?            "闂€屾湁浠€涔堜俊鎭€嶆椂浼樺厛璇存槑鏂囨。涓婚銆佸垪鍚箟銆佹帓鍚嶆€ц川锛涘嬁闅忓彛缂栭€犵粺璁℃暟瀛椼€?        )    critique_hint = ""    if re.search(        r"涓嶅ソ|缂虹偣|涓嶈冻|钖勫急|鏀硅繘|浼樺寲|闂鍦ㄥ摢|鏈変粈涔堥棶棰榺鍐欏緱鎬庢牱|璇勪环|鎵硅瘎|鎸囧嚭|寤鸿|寮遍」",        query,    ):        critique_hint = (            "\n10. 銆愯瘎浠?鏀硅繘绫汇€戣嫢鐢ㄦ埛闂€屽摢閲屽啓寰椾笉濂姐€嶃€屾湁浣曠己鐐广€嶃€屽浣曟敼杩涖€嶇瓑锛?            "蹇呴』鐩存帴鍐欏嚭**鍙敼杩涚偣**锛堜緥濡傦細缂哄皯閲忓寲鎴愭灉涓庢暟鎹€佹煇娈典笌鐩爣宀椾綅鍏宠仈寮便€侀」鐩弿杩扮己鑳屾櫙涓庣粨鏋溿€佹帓鐗堟垨缁撴瀯涓嶆竻锛夛紝"            "涓嶈鍙仛绠€鍘嗘憳瑕侊紝涔熶笉瑕佺敤銆屼俊鎭亸灏戙€嶃€岃緝涓虹畝鐣ャ€嶇瓑绌鸿瘽鏁疯锛?            "鑻ヤ綘鍦ㄥ悗鏂囧垪涓惧嚭鏌愭澘鍧楀凡鏈夎緝澶氬叿浣撳唴瀹癸紝灏变笉寰楀啀绉拌鏉垮潡銆岀█鐤忋€嶃€岃繃灏戙€嶏紝閬垮厤鍓嶅悗鐭涚浘銆?        )    vague_pronoun_hint = ""    if re.search(r"杩欐槸浠€涔坾鏄暐|鍟ョ帺鎰弢浠€涔堟枃妗骞插槢鐨剕骞蹭粈涔堢殑|浠嬬粛涓€涓媩姒傛嫭涓€涓媩璁茶", query):        vague_pronoun_hint = (            "\n11. 銆愭寚浠ｆ暣浠芥潗鏂欍€戣嫢鐢ㄦ埛鐢ㄣ€岃繖銆嶃€屽暐銆嶇瓑鎸囦唬褰撳墠閫変腑鐨勬枃妗ｏ細"            "蹇呴』缁撳悎鍙傝€冪墖娈典笂鏂圭殑銆愭枃浠跺悕銆戜笌姝ｆ枃锛堣〃澶淬€佸垪鍚嶃€佹暟鎹舰鎬侊級鍒ゆ柇鏂囨。绫诲瀷涓庣敤閫旓紝鐢ㄤ竴涓ゅ彞璇濊鏄?            "锛堜緥濡傦細瀛︾敓缁煎悎鎴愮哗鎺掑悕琛ㄣ€佹帹鍏嶉€夋嫈渚濇嵁绛夛級銆?            "鎺掑悕绫?PDF 鐨勬鏂囧父涓哄鍙蜂笌鍒嗘暟锛屾病鏈夊崟鐙€屾爣棰樻銆嶆槸姝ｅ父鐜拌薄锛?*涓嶅緱**鍥犳杈撳嚭銆屾棤娉曞洖绛斻€嶃€?        )    return f"""浣犳槸涓€涓笓涓氱殑鏂囨。闂瓟鍔╂墜銆傝鏍规嵁浠ヤ笅鍙傝€冩枃妗ｏ紝鍥炵瓟鐢ㄦ埛鐨勯棶棰樸€?## 鍙傝€冩枃妗?{context}## 鐢ㄦ埛闂{query}## 鍥炵瓟瑕佹眰1. 鍩轰簬鍙傝€冩枃妗ｅ唴瀹瑰洖绛旓紱鏃犱緷鎹椂涓嶈缂栭€犱簨瀹炴€т俊鎭紙濡傝櫄鏋勫叕鍙搞€侀」鐩€佸垎鏁帮級銆?2. 浠呭綋鍙傝€冩枃妗ｅ嚑涔庢病鏈変换浣曚笌闂鐩稿叧鐨勬弿杩版椂锛屾墠杈撳嚭銆屾牴鎹彁渚涚殑淇℃伅鏃犳硶鍥炵瓟璇ラ棶棰樸€嶃€傞棶銆岃繖鏄粈涔堛€嶄笖銆愭枃浠跺悕銆戞垨琛ㄦ牸缁撴瀯宸茶兘鍒ゆ柇鏂囨。鎬ц川鏃讹紝**涓嶅睘浜?*銆屾棤娉曞洖绛斻€嶆儏褰€?3. 鑻ラ棶棰橀渶瑕佸悎鐞嗘帹鏂紙渚嬪銆屽鏋滀綘鏄?HR 浼氶棶浠€涔堛€嶃€屾湁浠€涔堝缓璁€嶏級锛岃€屾枃妗ｄ腑鏈夎浜虹殑缁忓巻銆侀」鐩€佹妧鑳姐€佹暀鑲茬瓑鍙牳瀵逛俊鎭紝璇峰熀浜庤繖浜涗俊鎭粰鍑虹畝瑕併€佸叿浣撶殑鎺ㄦ柇鎴栭棶棰樺垪琛紝骞惰鏄庝緷鎹潵鑷枃妗ｄ腑鐨勫摢浜涚被鍨嬬殑淇℃伅銆?4. 鍥炵瓟瑕佸噯纭€佺畝娲併€佹湁鏉＄悊銆?5. 銆愯仛鍚?缁熻绫婚棶棰樸€戣嫢鐢ㄦ埛闂€屾湁鍝簺銆嶃€屾湁鍑犱釜銆嶃€屽垪鍑烘墍鏈夈€嶇瓑锛岃褰掔撼鍘婚噸鍚庢眹鎬讳綔绛斻€?{critique_hint}{vague_pronoun_hint}{extra_requirement}{table_score_hint}6. 涓ョ鎶婃湰鎻愮ず涓殑鏉℃缂栧彿銆佸皬鏍囬鎴栥€屽洖绛旀牸寮忋€嶈鏄庡杩拌繘绛旀锛涚姝㈣緭鍑轰互銆?. 銆愯仛鍚堛€嶃€?. 銆愭垚缁┿€嶇瓑寮€澶寸殑鍏冭鏄庡彞銆?7. 鍙潰鍚戞渶缁堢敤鎴峰啓浣滐紝涓嶈瑙ｉ噴绯荤粺瑙勫垯銆?## 鍥炵瓟鏍煎紡锛堝彧杈撳嚭浠ヤ笅涓よ锛屽嬁娣诲姞鍏跺畠绔犺妭鏍囬锛?鍥炵瓟: <浣犵殑鍥炵瓟>鏉ユ簮: {source_names}"""def detect_conflicts(chunks: list) -> list:    """    浠庢绱㈠埌鐨勭墖娈典腑鎵弿鏄惁鍑虹幇銆屽悓涓€璇箟瀛楁澶氫釜涓嶅悓鍙栧€笺€嶃€?    娉ㄦ剰锛氬悕鍗?琛ㄦ牸绫绘枃妗ｉ噷澶氳鏃ユ湡銆佸鍙枫€佸簭鍙蜂細琚棫鐗堝鏉炬鍒欒鍒や负鍐茬獊锛?    杩涜€岃鍓嶇鏄剧ず銆屽婧愬啿绐併€嶃€佹媺浣庣敤鎴峰绛旀鐨勪俊浠伙紱姝ゅ宸叉敹绱ц鍒欍€?    """    conflicts = []    # 鈹€鈹€ 閲戦鍐茬獊妫€娴?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€    # 蹇呴』鏈夎揣甯佸崟浣嶏紝閬垮厤鎶婂鍙枫€佸簭鍙枫€佸勾浠界瓑绾暟瀛楄鍒や负銆屽涓噾棰濄€?    money_patterns = [        r"(\d+(?:\.\d+)?\s*涓囧厓)",        r"(\d+(?:\.\d+)?\s*鍏?",        r"(楼\s*\d+(?:\.\d+)?)",        r"(浜烘皯甯乗s*\d+(?:\.\d+)?\s*鍏?)",    ]    money_values: Dict[str, list] = {}    for chunk in chunks:        content = chunk.get("content", "")        for pat in money_patterns:            for match in re.findall(pat, content):                val = match.strip()                if val and len(val) > 1:                    money_values.setdefault(val, []).append(chunk.get("chunk_id", ""))    if len(money_values) > 1:        conflicts.append({            "key": "閲戦",            "values": list(money_values.keys()),            "from_chunks": list(money_values.values())        })    # 鈹€鈹€ 鏃ユ湡鍐茬獊妫€娴嬶紙鎸夎涔夌被鍨嬪垎绫伙級鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€    # 鈿狅笍 M3-003 淇: 鎸夋棩鏈熻涔夌矑搴﹀垎绫伙紝鑰岄潪绠€鍗曠殑鏁伴噺闃堝€?    # 鍚堝悓涓嚜鐒跺寘鍚細绛捐鏃ユ湡銆佺敓鏁堟棩鏈熴€佺粓姝㈡棩鏈熴€佷粯娆炬棩鏈熺瓑锛岃繖浜涗笉鏄啿绐?    # 鐪熸鐨勫啿绐佹槸锛氬悓涓€璇箟绮掑害鐨勬棩鏈熷嚭鐜板涓笉鍚屽€硷紙濡備袱涓笉鍚岀殑绛捐鏃ユ湡锛?    # 绂佹瑁?\d{4}锛氬鍙?鎺掑悕琛ㄤ腑鐨?8 浣嶅鍙蜂細琚垏鎴?5522銆?323 绛夛紝璇垽涓恒€屽骞翠唤鍐茬獊銆?    DATE_GRANULARITY_PATTERNS = [        # (璇箟鏍囩, 姝ｅ垯妯″紡, 鏈€灏忓瓧绗﹂暱搴?        ("绛捐/鐢熸晥鏃ユ湡", r"\d{4}骞碶d{1,2}鏈圽d{1,2}鏃?, 10),        ("绛捐/鐢熸晥鏃ユ湡", r"\d{4}-\d{2}-\d{2}", 10),        ("绛捐/鐢熸晥鏃ユ湡", r"\d{4}/\d{1,2}/\d{1,2}", 10),        ("骞存湀", r"\d{4}骞碶d{1,2}鏈?, 7),        ("骞存湀", r"\d{4}-\d{2}", 7),        ("骞翠唤", r"\d{4}骞?, 5),    ]    # 鎸夎涔夌矑搴﹀垎缁勮鏁?    granularity_counts: Dict[str, Dict[str, list]] = {}    for chunk in chunks:        content = chunk.get("content", "")        chunk_id = chunk.get("chunk_id", "")        for label, pat, _ in DATE_GRANULARITY_PATTERNS:            for match in re.findall(pat, content):                if len(match) >= 4:                    granularity_counts.setdefault(label, {}).setdefault(match, []).append(chunk_id)    # 姣忎釜璇箟绮掑害涓嬶紝鑻ヨ绮掑害鐨勬棩鏈熷€兼暟閲?>= 2 涓旀潵婧?chunk 灞炰簬涓嶅悓鏂囨。 鈫?鎶ュ憡鍐茬獊    # 浠呰法 chunk 鏉ユ簮鎵嶅彲鑳芥槸鐪熸鐨勫婧愬啿绐侊紙鍚屼竴 chunk 鍐呭琛屾棩鏈熻〃鏍间笉瑙﹀彂锛?    for label, value_map in granularity_counts.items():        distinct_values = list(value_map.keys())        if len(distinct_values) <= 1:            continue        # 鑾峰彇娑夊強璇ョ矑搴︽棩鏈熺殑鎵€鏈?chunk_id        involved_chunks = []        for chunk_ids in value_map.values():            involved_chunks.extend(chunk_ids)        distinct_chunks = set(involved_chunks)        # 鑻ュ悓涓€璇箟绮掑害涓嬫湁 >= 2 涓笉鍚屽€硷紝涓旀潵鑷笉鍚?chunk 鈫?鍙兘鏄啿绐?        # 浣嗚嫢鎵€鏈?chunk 閮芥潵鑷悓涓€鏂囦欢锛堝悓涓€ chunk 鍒楄〃涓殑澶氫釜琛ㄦ牸琛岋級锛屽垯璺宠繃        # 褰撳墠 chunks 鍒楄〃涓嫢鏉ヨ嚜鍚屼竴鏂囦欢涓?chunk_id 鍓嶇紑鐩稿悓锛岃涓哄悓婧?        if len(distinct_values) >= 2 and len(distinct_chunks) >= 2:            conflicts.append({                "key": f"鏃ユ湡({label})",                "values": distinct_values,                "from_chunks": [value_map[v] for v in distinct_values]            })    # 鈹€鈹€ 姣斾緥鍐茬獊妫€娴?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€    # 鎺掑悕琛?鎴愮哗鍗曢噷姣忚閮芥湁涓嶅悓鐨勩€岀患鍚堟垚缁╁崰姣斻€嶇瓑鐧惧垎姣旓紝鍑虹幇澶氫釜涓嶅悓 % 鏄父鎬侊紝    # 涓嶅簲瑙嗕负銆屽婧愮煕鐩俱€嶃€備粎鍦ㄣ€屽浠戒笉鍚屾枃妗ｃ€嶄笖涓嶅悓鍙栧€艰緝灏戞椂锛屾墠鍙兘鏄悓涓€鎸囨爣鍙ｅ緞鍐茬獊銆?    ratio_patterns = [r"(\d+\.?\d*%)", r"(\d+)\s*%"]    ratio_values: Dict[str, list] = {}    for chunk in chunks:        content = chunk.get("content", "")        for pat in ratio_patterns:            for match in re.findall(pat, content):                val = match.strip()                if val and len(val) > 1:                    ratio_values.setdefault(val, []).append(chunk.get("chunk_id", ""))    distinct_sources = {chunk.get("source_file", "") or chunk.get("filename", "") for chunk in chunks}    distinct_sources.discard("")    many_distinct_ratios = len(ratio_values) > 6  # 鍏稿瀷琛ㄦ牸锛氬琛屽悇涓嶇浉鍚岀殑鐧惧垎鏁?    if len(ratio_values) > 1 and len(distinct_sources) >= 2 and not many_distinct_ratios:        conflicts.append({            "key": "姣斾緥",            "values": list(ratio_values.keys()),            "from_chunks": list(ratio_values.values())        })    # 鈹€鈹€ 鍏徃鍚嶅啿绐佹娴?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€    company_patterns = [r"([^\s]{4,}鍏徃)", r"([^\s]{2,}璐告槗)", r"([^\s]{2,}绉戞妧)"]    company_values: Dict[str, list] = {}    for chunk in chunks:        content = chunk.get("content", "")        for pat in company_patterns:            for match in re.findall(pat, content):                val = match.strip()                if val and len(val) > 3:                    company_values.setdefault(val, []).append(chunk.get("chunk_id", ""))    # 鍏徃鍚嶅幓閲嶏紙鍚屼竴鍏徃鍚嶅彲鑳戒互鍏ㄧО鍜岀畝绉板嚭鐜帮級    if len(company_values) > 1:        conflicts.append({            "key": "鍏徃鍚?,            "values": list(company_values.keys()),            "from_chunks": list(company_values.values())        })    return conflictsdef fuse_results(top_chunks: list, conflicts: list) -> tuple:    fusion_info = {        "has_conflicts": len(conflicts) > 0,        "conflict_count": len(conflicts),        "conflict_details": conflicts    }    if not conflicts:        return top_chunks, fusion_info    for chunk in top_chunks:        chunk_id = chunk.get("chunk_id", "")        chunk_conflicts = []        for cf in conflicts:            for cid_list in cf["from_chunks"]:                if chunk_id in cid_list:                    chunk_conflicts.append({                        "key": cf["key"],                        "values": cf["values"]                    })        chunk["has_conflict"] = len(chunk_conflicts) > 0        chunk["related_conflicts"] = chunk_conflicts    return top_chunks, fusion_infodef mmr_diversity_rerank(query: str, chunks: list, lambda_val: float = None, query_embedding: np.ndarray = None) -> list:    """    MMR (Maximal Marginal Relevance) Diversity 閲嶆帓搴忋€?    浣嶄簬 CrossEncoder 閲嶆帓搴忎箣鍚庯紝鍦ㄧ浉鍏虫€у拰澶氭牱鎬т箣闂村彇骞宠　銆?    鍏紡: MMR = 位路Sim(query, doc) 鈭?(1鈭捨?路max_Sim(doc, already_selected)    璁烘枃: Carbonell & Goldstein, SIGIR 1998    Args:        query: 鐢ㄦ埛鏌ヨ        chunks: 宸叉寜 rerank_score 闄嶅簭鎺掑垪鐨?chunk 鍒楄〃        lambda_val: 骞宠　绯绘暟锛?=鍙湅鐩稿叧鎬э紝0=鍙湅澶氭牱鎬э紝榛樿浠庨厤缃鍙?        query_embedding: 鈿狅笍 M3-004 淇: 浼犲叆棰勮绠楃殑 query embedding锛孧MR 鐩存帴澶嶇敤                                鑰岄潪閲嶆柊缂栫爜锛岃妭鐪佺害 50% 鐨?embedding 鏃堕棿    Returns:        缁?MMR 绛涢€夊悗鐨?chunk 鍒楄〃锛堥『搴忓凡鏇存柊锛?    """    if not chunks or len(chunks) <= 2:        return chunks    lambda_val = lambda_val or getattr(settings, "mmr_lambda", 0.7)    if not getattr(settings, "mmr_enabled", False):        return chunks    try:        embed_model = _get_embed_model()        contents = [c.get("content", "") for c in chunks]        # chunk_embeds锛氭棤璁烘槸鍚︿紶鍏?query_embedding锛岄兘闇€瑕佺紪鐮侊紙ChromaDB query 涓嶈繑鍥?embedding锛?        chunk_embeds = embed_model.encode(contents, normalize_embeddings=True)        relevance_scores = np.array([c.get("rerank_score", 0.0) for c in chunks])        if relevance_scores.max() != relevance_scores.min():            relevance_scores = (relevance_scores - relevance_scores.min()) / (                relevance_scores.max() - relevance_scores.min()            )        else:            relevance_scores = np.ones_like(relevance_scores) * 0.5        selected: list = []        remaining = list(range(len(chunks)))        while remaining and len(selected) < len(chunks):            best_score = -float("inf")            best_idx = None            for idx in remaining:                # 鈿狅笍 M3-004 淇: sim_to_query 搴斿熀浜庡悜閲忕┖闂翠腑鐨?query-doc 鐩镐技搴?                # 鑰岄潪渚濊禆 Reranker 鐨?score锛坰core 宸茬粡鏄帓搴忎緷鎹紝闈炵浉浼煎害閲忕翰锛?                # 鐢变簬 chunk_embeds 宸插綊涓€鍖栵紝query_embedding 涔熷凡褰掍竴鍖栵紝                # 鐐圭Н鍗?cosine similarity 鈭?[-1, 1]锛屾鍊艰秺澶ц秺鐩镐技                if query_embedding is not None:                    sim_to_query = float(np.dot(query_embedding, chunk_embeds[idx]))                else:                    sim_to_query = float(relevance_scores[idx])                max_sim_to_selected = 0.0                if selected:                    selected_embeds = chunk_embeds[selected]                    similarities = np.dot(chunk_embeds[idx], selected_embeds.T)                    max_sim_to_selected = float(np.max(similarities))                mmr_score = (                    lambda_val * sim_to_query                    - (1 - lambda_val) * max_sim_to_selected                )                if mmr_score > best_score:                    best_score = mmr_score                    best_idx = idx            if best_idx is not None:                selected.append(best_idx)                remaining.remove(best_idx)        result = [chunks[i] for i in selected]        logger.info(            f"MMR Diversity 瀹屾垚 (位={lambda_val:.2f}): "            f"{len(chunks)} 鈫?{len(result)} 鏉★紝绉婚櫎浜?{len(chunks)-len(result)} 涓啑浣?chunk"        )        return result    except Exception as e:        logger.warning(f"MMR Diversity 澶辫触: {e}锛岃繑鍥炲師濮嬫帓搴?)        return chunksdef _load_file_as_chunks(file_paths: list, file_name_map: dict = None) -> list:    """    鐩存帴璇诲彇婧愭枃浠讹紝鎶婂唴瀹瑰悎骞舵垚灏戦噺 chunk 浼犵粰 LLM銆?    Excel/CSV锛氭寜鍒嗙被鍒楀幓閲嶅悗锛屾墍鏈夎鍚堝苟涓?1~2 涓ぇ chunk锛圕SV 鏍煎紡锛夛紝涓嶆媶鍒嗘垚姣忚涓€涓?chunk銆?    鍏朵粬鏂囦欢锛氭寜娈佃惤鍒囧垎锛岄檺鍒舵暟閲忋€?    file_name_map: {纾佺洏璺緞: 鐪熷疄鏂囦欢鍚峿锛屼紭鍏堢敤鐪熷疄鏂囦欢鍚嶅睍绀?    """    chunks = []    max_chunks = getattr(settings, "top_k", 10)  # 鎬?chunk 鏁颁笉瓒呰繃 TOP_K    for fp in file_paths:        # 浼樺厛浣跨敤鏁版嵁搴撲腑鐨勭湡瀹炴枃浠跺悕锛岄伩鍏嶆樉绀?UUID 纾佺洏鍚?        disk_name = fp.replace("\\", "/").split("/")[-1]        filename = (file_name_map or {}).get(fp, disk_name)        ext = fp.rsplit(".", 1)[-1].lower()        try:            if ext in ("xlsx", "xls"):                import pandas as pd                df = pd.read_excel(fp)            elif ext == "csv":                import pandas as pd                df = pd.read_csv(fp)            else:                with open(fp, "r", encoding="utf-8", errors="ignore") as f:                    text = f.read()                for i, para in enumerate(text.split("\n\n")):                    para = para.strip()                    if para and len(chunks) < max_chunks:                        chunks.append({"chunk_id": f"file_{i}", "content": para,                                       "source_file": fp, "page": i,                                       "hybrid_score": 1.0, "filename": filename})                continue            if df.empty:                continue            # 鎵惧垎绫诲垪鍘婚噸            dedup_col = None            for col in df.columns:                nunique = df[col].nunique()                if 1 < nunique < min(200, len(df) * 0.3):                    dedup_col = col                    break            sample_df = (df.drop_duplicates(subset=[dedup_col])                         if dedup_col else df.sample(n=min(50, len(df)), random_state=42))            # 鎶婃墍鏈夎鍚堝苟鎴?CSV 鏍煎紡鐨勫崟涓?chunk锛岃€屼笉鏄瘡琛屼竴涓?chunk            # 杩欐牱 LLM 鐪嬪埌鐨勬槸瀹屾暣鐨勮〃鏍硷紝鏉ユ簮鍙湁 1 涓枃浠?            csv_text = sample_df.to_csv(index=False)            # 鑻ュ唴瀹瑰お闀垮垯鍒囨垚 2 涓?chunk            chunk_size = 3000            for ci, start in enumerate(range(0, len(csv_text), chunk_size)):                piece = csv_text[start:start + chunk_size]                chunks.append({                    "chunk_id": f"{filename}_{ci}",                    "content": piece,                    "source_file": fp,                    "page": ci,                    "hybrid_score": 1.0,                    "filename": filename,                })                if len(chunks) >= max_chunks:                    break            logger.info(f"鐩存帴璇诲彇鏂囦欢 {filename}锛歿len(sample_df)} 琛岋紝鐢熸垚 chunk 鏁? {len(chunks)}")        except Exception as e:            logger.warning(f"鐩存帴璇诲彇鏂囦欢 {fp} 澶辫触: {e}")    return chunksdef distance_to_score(distance: float, method: str = "exp") -> float:    if distance is None or distance < 0:        return 0.0    if method == "exp":        return float(np.exp(-distance))    return 1.0 / (1.0 + distance)def _vector_search(query: str, query_embedding: list, file_ids: list) -> list:    """    鍚戦噺妫€绱紙鐙珛鍑芥暟锛屼緵骞惰璋冪敤锛?    """    collection = get_collection()    vector_results = collection.query(        query_embeddings=[query_embedding],        n_results=settings.top_k * 2,        where={"file_id": {"$in": file_ids}} if file_ids else None    )    vector_chunks = []    if vector_results and vector_results.get("ids"):        ids = vector_results["ids"][0]        documents = vector_results.get("documents", [[]])[0]        metadatas = vector_results.get("metadatas", [[]])[0]        distances = vector_results.get("distances", [[]])[0]        for i, chunk_id in enumerate(ids):            metadata = metadatas[i] if i < len(metadatas) and metadatas[i] else {}            vector_chunks.append({                "chunk_id": chunk_id,                "content": documents[i] if i < len(documents) else "",                "source_file": metadata.get("source_file", ""),                "page": metadata.get("page", 0),                "distance": distances[i] if i < len(distances) else 0,                "vector_score": distance_to_score(distances[i]) if i < len(distances) else 0            })    logger.info(f"鍚戦噺妫€绱㈠畬鎴? 鑾峰彇 {len(vector_chunks)} 鏉＄粨鏋?)    return vector_chunks# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# BM25S 杩愯鏃剁紦瀛?# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?_BM25_CACHE_VALID = False_BM25_INDEX: Optional[bm25s.BM25] = None_BM25_CACHE_KEY = None_BM25_RECORDS: list = []_BM25_CORPUS: list = []  # BM25S 闇€瑕佸師濮嬫枃鏈緵 retrieve() 浣跨敤_BM25S_INDEX_PATH = "./db/bm25s_index"def invalidate_bm25_runtime_cache():    global _BM25_CACHE_VALID, _BM25_INDEX, _BM25_CACHE_KEY, _BM25_RECORDS, _BM25_CORPUS    _BM25_CACHE_VALID = False    _BM25_INDEX = None    _BM25_CACHE_KEY = None    _BM25_RECORDS = []    _BM25_CORPUS = []    logger.info("BM25S 杩愯鏃剁紦瀛樺凡澶辨晥")def _ensure_bm25_ready(file_ids: list = None):    global _BM25_INDEX, _BM25_CORPUS, _BM25_CACHE_VALID, _BM25_CACHE_KEY, _BM25_RECORDS    cache_key = tuple(sorted(file_ids)) if file_ids else "__all__"    if _BM25_CACHE_VALID and _BM25_INDEX is not None and _BM25_CACHE_KEY == cache_key:        return    records = get_bm25_records(file_ids)    _BM25_RECORDS = records    if not records:        _BM25_INDEX = None        _BM25_CORPUS = []        _BM25_CACHE_VALID = True        _BM25_CACHE_KEY = cache_key        return    corpus = [r["content"] for r in records]    _BM25_CORPUS = corpus    # 灏濊瘯浠庢寔涔呭寲鏂囦欢鍔犺浇锛堟枃浠跺悕鍚褰曟暟锛岃褰曟暟鍙樺寲鏃惰嚜鍔ㄥけ鏁堬級    method = getattr(settings, "bm25s_method", "robertson")    index_file = f"{_BM25S_INDEX_PATH}_{cache_key}_n{len(records)}.pt"    corpus_file = f"{_BM25S_INDEX_PATH}_{cache_key}_corpus.json"    import os, glob    if os.path.exists(index_file):        try:            _BM25_INDEX = bm25s.BM25.load(index_file, load_corpus=True)            _BM25_CACHE_VALID = True            _BM25_CACHE_KEY = cache_key            logger.info(f"BM25S 浠庢寔涔呭寲鍔犺浇: {len(records)} 鏉?)            return        except Exception as e:            logger.warning(f"BM25S 鎸佷箙鍖栧姞杞藉け璐ワ紝閲嶆柊鏋勫缓: {e}")    # 鏋勫缓绱㈠紩    corpus_tokens = bm25s.tokenize(corpus, stopwords=None)    _BM25_INDEX = bm25s.BM25(method=method)    _BM25_INDEX.index(corpus_tokens)    # 鎸佷箙鍖栦繚瀛橈紙鍏堝垹鍚?cache_key 鐨勬棫鏂囦欢锛?    try:        for old in glob.glob(f"{_BM25S_INDEX_PATH}_{cache_key}_n*.pt"):            try:                os.remove(old)            except Exception:                pass        os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)        _BM25_INDEX.save(index_file)        logger.info(f"BM25S 鎸佷箙鍖栧凡淇濆瓨: {index_file}")    except Exception as e:        logger.warning(f"BM25S 鎸佷箙鍖栧け璐? {e}")    _BM25_CACHE_VALID = True    _BM25_CACHE_KEY = cache_key    logger.info(f"BM25S 绱㈠紩鏋勫缓瀹屾垚: {len(records)} 鏉? method={method}")def _bm25_search(query: str, file_ids: list = None) -> Tuple[dict, dict]:    """    BM25S 妫€绱紙鐙珛鍑芥暟锛屼緵骞惰璋冪敤锛?    鏀寔 file_ids 杩囨护锛屽苟鐩存帴杩斿洖 chunk_id -> score 鏄犲皠    """    _ensure_bm25_ready(file_ids)    bm25_scores_map = {}    bm25_doc_map = {}    if not _BM25_RECORDS or _BM25_INDEX is None:        return bm25_scores_map, bm25_doc_map    # BM25S 鍐呯疆鍒嗚瘝锛屽悓鏃舵敮鎸佷腑鏂?jieba    query_tokens = list(jieba.cut(query))    query_tokens = [t.strip() for t in query_tokens if t.strip()]    logger.info(f"BM25S 鍒嗚瘝缁撴灉: query='{query}' -> {query_tokens}")    # retrieve 杩斿洖 namedtuple(result.documents, result.scores)锛宬=None 鍙栧叏閮?    # BM25S.load(load_corpus=True) 浼氭妸 corpus 瀛樺叆瀵硅薄鍐呴儴锛宑orpus=None 鍒欒嚜鍔ㄧ敤鍐呴儴鐨?    result = _BM25_INDEX.retrieve(        [query_tokens],        corpus=None,        k=len(_BM25_CORPUS),        return_as="tuple",    )    doc_ids = result.documents[0] if len(result.documents) else []    scores = result.scores[0] if len(result.scores) else []    for idx, score in zip(doc_ids, scores):        idx_int = int(idx)        if idx_int < len(_BM25_RECORDS):            record = _BM25_RECORDS[idx_int]            chunk_id = record["chunk_id"]            bm25_scores_map[chunk_id] = float(score)            bm25_doc_map[chunk_id] = {                "content": record["content"],                "file_id": record["file_id"],                "source_file": record["source_file"],                "page": record["page"],            }    logger.info(f"BM25S 妫€绱㈠畬鎴? {len(bm25_scores_map)} 鏉″緱鍒?)    return bm25_scores_map, bm25_doc_mapdef reciprocal_rank_fusion(results_list: list, k: int = 60) -> dict:    """    Reciprocal Rank Fusion (RRF) 鈥?Google 鎻愬嚭鐨勬棤鍙傛绱㈣瀺鍚堟柟娉曘€?    涓嶄緷璧栧緱鍒嗙粷瀵瑰€硷紝鍙緷璧栨帓鍚嶉『搴忥紝瀵瑰悇璺绱㈢粨鏋滀竴瑙嗗悓浠併€?    鍏紡: RRF(d) = 危 1/(k + rank(d))    Args:        results_list: 鍚勮矾妫€绱㈢殑宸叉帓搴忕粨鏋滃垪琛紙姣忎釜鍏冪礌鏄?dict锛岄渶鏈?chunk_id锛?        k: RRF 瓒呭弬鏁帮紝榛樿 60銆傚€艰秺澶э紝鍚勮矾缁撴灉鐨勬潈閲嶈秺瓒嬩簬鍧囩瓑銆?    Returns:        chunk_id -> rrf_score 鐨勬槧灏勶紝鎸夊垎闄嶅簭鎺掑垪    """    scores: dict = {}    for results in results_list:        if not results:            continue        for rank, item in enumerate(results):            chunk_id = item.get("chunk_id")            if chunk_id:                scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)    sorted_chunk_ids = sorted(scores.items(), key=lambda x: x[1], reverse=True)    return dict(sorted_chunk_ids)def _hybrid_retrieve(query: str, file_ids: list, file_paths: list = None, file_name_map: dict = None) -> list:    """    娣峰悎妫€绱細    - 鑻ユ彁渚?file_paths 涓旀枃浠朵负缁撴瀯鍖栬〃鏍硷紙Excel/CSV锛夛紝鐩存帴璇绘枃浠跺彇澶氭牱鎬ф牱鏈紝璺宠繃鍚戦噺妫€绱?    - 鍚﹀垯璧板悜閲?BM25娣峰悎妫€绱?    """    # 鍒ゆ柇鏄惁鏈夌粨鏋勫寲鏂囦欢鍙洿鎺ヨ鍙?    structured_exts = {"xlsx", "xls", "csv"}    if file_paths:        structured = [fp for fp in file_paths if fp.rsplit(".", 1)[-1].lower() in structured_exts]        if structured:            logger.info(f"妫€娴嬪埌缁撴瀯鍖栨枃浠讹紝鐩存帴璇诲彇璺宠繃鍚戦噺妫€绱? {structured}")            direct_chunks = _load_file_as_chunks(structured, file_name_map=file_name_map)            # 闈炵粨鏋勫寲鏂囦欢浠嶈蛋鍚戦噺妫€绱?            other = [fp for fp in file_paths if fp not in structured]            if other:                pass  # 鏆備笉澶勭悊娣峰悎鎯呭喌            if direct_chunks:                return direct_chunks    model = _get_embed_model()    query_embedding = model.encode(query)    # 鍚屾椂淇濈暀 list 渚?ChromaDB query 浣跨敤锛屽拰 ndarray 渚?MMR 浣跨敤    query_embedding_list = query_embedding.tolist()    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:        vector_future = executor.submit(_vector_search, query, query_embedding_list, file_ids)        bm25_future = executor.submit(_bm25_search, query, file_ids)        vector_chunks = vector_future.result()        bm25_scores_map, bm25_doc_map = bm25_future.result()    candidate_map = {}    for vc in vector_chunks:        chunk_id = vc["chunk_id"]        candidate_map[chunk_id] = {            "chunk_id": chunk_id,            "content": vc.get("content", ""),            "source_file": vc.get("source_file", ""),            "page": vc.get("page", 0),            "distance": vc.get("distance", 0),            "vector_score": float(vc.get("vector_score", 0.0)),            "bm25_score": float(bm25_scores_map.get(chunk_id, 0.0)),        }    bm25_ranked = sorted(        bm25_scores_map.items(),        key=lambda x: x[1],        reverse=True    )[: settings.top_k * 3]    # 鈿狅笍 淇 M3-001: 褰?chunk 鍚屾椂琚悜閲忔绱㈠拰 BM25 鍛戒腑鏃讹紝    # 搴斿悓鏃朵繚鐣欎袱涓淮搴︾殑寰楀垎锛岃€岄潪蹇界暐 BM25 寰楀垎    for chunk_id, bm25_score in bm25_ranked:        if chunk_id in candidate_map:            # chunk 宸插瓨鍦ㄤ簬 candidate_map锛堣鍚戦噺妫€绱㈠懡涓級锛屾洿鏂板叾 BM25 寰楀垎            # 纭繚鍚庣画鐨?RRF/绾挎€ц瀺鍚堣兘鍚屾椂鑰冭檻涓や釜缁村害鐨勬帓鍚?            candidate_map[chunk_id]["bm25_score"] = float(bm25_score)        else:            # chunk 浠呰 BM25 鍛戒腑锛堝悜閲忔绱㈡湭鍙洖锛夛紝娣诲姞涓哄€欓€?            doc_info = bm25_doc_map.get(chunk_id, {})            candidate_map[chunk_id] = {                "chunk_id": chunk_id,                "content": doc_info.get("content", ""),                "source_file": doc_info.get("source_file", ""),                "page": doc_info.get("page", 0),                "distance": None,                "vector_score": 0.0,                "bm25_score": float(bm25_score),            }    candidates = list(candidate_map.values())    if not candidates:        return []    fusion_method = getattr(settings, "fusion_method", "rrf")    if fusion_method == "rrf":        rrf_k = getattr(settings, "rrf_k", 60)        vector_ranked = sorted(            [c for c in candidates if c.get("vector_score", 0) > 0 or c.get("distance") is not None],            key=lambda x: x.get("vector_score", 0),            reverse=True        )        bm25_ranked = sorted(            [c for c in candidates if c.get("bm25_score", 0) > 0],            key=lambda x: x.get("bm25_score", 0),            reverse=True        )        rrf_scores = reciprocal_rank_fusion([vector_ranked, bm25_ranked], k=rrf_k)        for c in candidates:            c["hybrid_score"] = float(rrf_scores.get(c["chunk_id"], 0.0))        candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)        logger.info(f"RRF 铻嶅悎瀹屾垚 (k={rrf_k}), vector_rank={len(vector_ranked)}, bm25_rank={len(bm25_ranked)}")    else:        # 鈿狅笍 M3-002 淇: 鏄庣‘鏍囨敞 linear 铻嶅悎涓哄疄楠屾€у姛鑳?        # linear 妯″紡浣跨敤鑷€傚簲鏉冮噸锛堢煭鏌ヨ鍋?BM25锛岄暱鏌ヨ鍋忓悜閲忥級锛?        # 閫氳繃 Min-Max 褰掍竴鍖栧皢涓よ矾寰楀垎鏄犲皠鍒?[0,1] 鍚庡姞鏉冩眰鍜屻€?        # RRF 妯″紡锛堥粯璁わ級鍥犳棤闇€褰掍竴鍖栥€佸弬鏁板皯銆佹晥鏋滅ǔ瀹氾紝浼樺厛鎺ㄨ崘浣跨敤銆?        logger.warning(            "[HYBRID] 浣跨敤浜?fusion_method='linear'锛岃繖鏄疄楠屾€у姛鑳姐€?            "鎺ㄨ崘浣跨敤 fusion_method='rrf'锛堥粯璁わ級锛屾晥鏋滄洿绋冲畾銆?        )        weight_vector, weight_bm25 = get_adaptive_weights(query)        vector_scores = [c["vector_score"] for c in candidates]        bm25_scores = [c["bm25_score"] for c in candidates]        vector_norm = _normalize_scores(vector_scores)        bm25_norm = _normalize_scores(bm25_scores)        for i, c in enumerate(candidates):            c["vector_score_norm"] = vector_norm[i]            c["bm25_score_norm"] = bm25_norm[i]            c["hybrid_score"] = (                c["vector_score_norm"] * weight_vector +                c["bm25_score_norm"] * weight_bm25            )        candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)    # 鍘婚噸锛氫紭鍏堟寜 chunk_id锛涜嫢 chunk_id 涓嶅悓浣?content 涓€鏍凤紝涔熷彧淇濈暀鍒嗛珮鐨?    deduped = []    seen_contents = set()    for c in candidates:        content_key = (c.get("content") or "").strip()        if content_key and content_key in seen_contents:            continue        if content_key:            seen_contents.add(content_key)        deduped.append(c)    top_chunks = deduped[: settings.top_k * 2]    top_chunks = rerank_chunks(query, top_chunks, top_k=settings.top_k)    # 鈿狅笍 M3-004 淇: 浼犲叆 query_embedding ndarray锛屾秷闄?MMR 浜屾缂栫爜    top_chunks = mmr_diversity_rerank(query, top_chunks, query_embedding=query_embedding)    # 鍚戦噺/BM25 璺緞锛氱敤 file_name_map 鎶?UUID basename 鏇挎崲鎴愮湡瀹炴枃浠跺悕    if file_name_map:        for c in top_chunks:            if not c.get("filename"):                src = c.get("source_file", "")                # source_file 鍙兘鏄?basename 鎴栧畬鏁磋矾寰勶紝涓ょ閮芥煡                real = file_name_map.get(src) or file_name_map.get(src.replace("\\", "/").split("/")[-1])                if real:                    c["filename"] = real    logger.info(        f"娣峰悎妫€绱㈠畬鎴? vector={len(vector_chunks)}, bm25={len(bm25_scores_map)}, "        f"merged={len(candidates)}, deduped={len(deduped)}, top={len(top_chunks)}"    )    return top_chunksdef retrieve_and_answer(query: str, file_ids: list, file_paths: list = None,                        scenario: str = "default", file_name_map: dict = None) -> dict:    """    娣峰悎妫€绱紙鍚戦噺+BM25锛夆啋 閲嶆帓搴?鈫?鍐茬獊妫€娴?鈫?铻嶅悎 鈫?璋僉LM鐢熸垚绛旀    file_paths: 鐢?API 灞備粠 DB 鏌ュ嚭锛岀粨鏋勫寲鏂囦欢鐩存帴璇诲彇锛屾棤闇€鍚戦噺妫€绱?    file_name_map: {纾佺洏璺緞: 鐪熷疄鏂囦欢鍚峿锛岀敤浜庡湪鏉ユ簮涓樉绀哄彲璇绘枃浠跺悕    """    logger.info(f"鏀跺埌闂瓟璇锋眰: query={query}, file_ids={file_ids}")    from modules.cache.redis_client import get_cached_result, set_cached_result    cache_key_raw = f"{query}|{sorted(file_ids)}|{scenario}"    query_hash = hashlib.md5(cache_key_raw.encode()).hexdigest()    # key 鏍煎紡鍚?file_ids锛屼究浜庡悗缁寜 file_id 绮惧噯娓呯紦瀛?    file_ids_str = ",".join(sorted(file_ids)) if file_ids else "all"    cache_key = f"a23:query:{query_hash}:fi:{file_ids_str}"    cached = get_cached_result(cache_key)    if cached:        logger.info("杩斿洖缂撳瓨缁撴灉锛岃烦杩囨绱?)        return cached    try:        start_time = time.time()        top_chunks = _hybrid_retrieve(query, file_ids, file_paths=file_paths, file_name_map=file_name_map)        elapsed = time.time() - start_time        logger.info(f"妫€绱㈠畬鎴愶紝鑰楁椂: {elapsed:.2f}s, top_chunks={len(top_chunks)}")        if not top_chunks:            result = {                "query": query,                "answer": "鏍规嵁鎻愪緵鐨勪俊鎭棤娉曞洖绛旇闂銆?,                "sources": [],                "confidence": -1,                "fusion": {                    "has_conflicts": False,                    "conflict_count": 0,                    "conflict_details": []                }            }            set_cached_result(cache_key, result)            return result        conflicts = detect_conflicts(top_chunks)        if conflicts:            logger.info(f"妫€娴嬪埌 {len(conflicts)} 澶勫啿绐?)            for cf in conflicts:                logger.info(f"  鍐茬獊瀛楁: {cf['key']}, 鍑虹幇鍊? {cf['values']}")        prompt = _build_prompt(query, top_chunks, scenario=scenario)        llm_client = OpenAI(            api_key=settings.llm_api_key,            base_url=settings.llm_base_url        )        response = llm_client.chat.completions.create(            model=settings.llm_model,            messages=[{"role": "user", "content": prompt}],            temperature=0,            max_tokens=1500        )        answer = _normalize_answer_text((response.choices[0].message.content or "").strip())        avg_score = float(np.mean([c["hybrid_score"] for c in top_chunks])) if top_chunks else 0.0        ref_score = float(max(c["hybrid_score"] for c in top_chunks)) if top_chunks else 0.0        # RRF 缁濆鍊肩害 0.015锝?.06锛岀嚎鎬ф槧灏勫埌 0.15锝?.95锛岄伩鍏嶇晫闈㈤暱鏈熸樉绀恒€?%銆嶉€犳垚璇垽        strength = max(avg_score, ref_score * 0.9)        confidence = (            round(min(0.95, max(0.15, 0.15 + min(1.0, strength / 0.048) * 0.8)), 2)            if top_chunks            else -1        )        top_chunks, fusion_info = fuse_results(top_chunks, conflicts)        sources = [            {                "chunk_id": c["chunk_id"],                "content": c["content"],                "source_file": c.get("filename") or c["source_file"],  # 浼樺厛鐢ㄧ湡瀹炴枃浠跺悕                "page": c["page"],                # RRF 绛夎瀺鍚堝垎缁濆鍊艰緝灏忥紝渚涘墠绔湪銆屾湰鎵圭墖娈点€嶅唴鍋氱浉瀵圭浉鍏冲害灞曠ず锛堝嬁涓庢棫鐗堝亣 80% 娣锋穯锛?                "score": float(c.get("hybrid_score", 0.0)),            }            for c in top_chunks        ]        result = {            "query": query,            "answer": answer,            "sources": sources,            "confidence": confidence,            "fusion": fusion_info        }        logger.info(f"闂瓟瀹屾垚: confidence={result['confidence']}, has_conflicts={fusion_info['has_conflicts']}")        set_cached_result(cache_key, result)        return result    except Exception as e:        logger.exception(f"闂瓟澶勭悊寮傚父: {e}")        from tests.mock_data import MOCK_ANSWER_RESULT        mock = copy.deepcopy(MOCK_ANSWER_RESULT)        mock["query"] = query        mock["answer"] = f"鎶辨瓑锛屽鐞嗘偍鐨勯棶棰樻椂閬囧埌闂: {str(e)}"        mock["confidence"] = -1        mock["fusion"] = {"has_conflicts": False, "conflict_count": 0, "conflict_details": []}        return mock
+"""
+混合检索与问答模块 - 负责人: 成员3
+函数签名已锁定，不得更改
+"""
+import concurrent.futures
+import copy
+import hashlib
+import re
+import time
+from typing import Optional, Tuple, Dict, List
+
+import jieba
+import numpy as np
+from loguru import logger
+from openai import OpenAI
+import bm25s
+from sentence_transformers import CrossEncoder
+
+from config import settings
+from modules.retriever.indexer import (
+    get_bm25_records,
+    get_collection,
+    _get_embed_model,
+)
+
+# ═══════════════════════════════════════════════════════════════════════
+# ReRanker 配置
+# ═══════════════════════════════════════════════════════════════════════
+RERANKER_TOP_K = 5
+
+# ═══════════════════════════════════════════════════════════════════════
+# 中文分词配置
+# ═══════════════════════════════════════════════════════════════════════
+STOPWORDS = set([
+    "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "一个",
+    "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好",
+    "自己", "这", "那", "里", "为", "什么", "可以", "这个", "那个", "但是", "还是",
+    "如果", "因为", "所以", "但是", "而", "与", "及", "或", "等", "于", "从", "以",
+    "及", "其", "被", "由", "对", "将", "把", "向", "给", "用", "通过", "进行",
+    "。", "，", "！", "？", "、", "\"", "“", "”", "‘", "’", "：", "；", "（", "）",
+    "【", "】", "[", "]", "{", "}", "/", "\\", "-", "_", "+", "=", "*", "#",
+    "@", "$", "%", "^", "&", "~", "`", "<", ">", "|", "\n", "\t", " ", "  ",
+])
+
+
+def tokenize_chinese(text: str, remove_stopwords: bool = True) -> list:
+    if not text:
+        return []
+
+    tokens = list(jieba.cut(text, cut_all=False))
+
+    if remove_stopwords:
+        tokens = [t.strip() for t in tokens if t.strip() and t.strip() not in STOPWORDS]
+    else:
+        tokens = [t.strip() for t in tokens if t.strip()]
+
+    return tokens
+
+
+def _normalize_scores(scores: list) -> list:
+    """Min-Max 归一化得分到 [0, 1]"""
+    if not scores:
+        return []
+    min_s, max_s = min(scores), max(scores)
+    if max_s == min_s:
+        return [1.0] * len(scores)
+    return [(s - min_s) / (max_s - min_s) for s in scores]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 自适应权重配置
+# ═══════════════════════════════════════════════════════════════════════
+def get_adaptive_weights(query: str) -> Tuple[float, float]:
+    tokens = tokenize_chinese(query, remove_stopwords=False)
+    token_count = len(tokens)
+
+    threshold = getattr(settings, "query_token_threshold", 5)
+    wv_short = getattr(settings, "weight_vector_short", 0.4)
+    wb_short = getattr(settings, "weight_bm25_short", 0.6)
+    wv_long = getattr(settings, "weight_vector_long", 0.7)
+    wb_long = getattr(settings, "weight_bm25_long", 0.3)
+
+    if token_count > threshold:
+        weight_vector = wv_long
+        weight_bm25 = wb_long
+        logger.info(f"自适应权重 [长查询 {token_count} 词]: vector={weight_vector}, bm25={weight_bm25}")
+    else:
+        weight_vector = wv_short
+        weight_bm25 = wb_short
+        logger.info(f"自适应权重 [短查询 {token_count} 词]: vector={weight_vector}, bm25={weight_bm25}")
+
+    return weight_vector, weight_bm25
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# CrossEncoder ReRanker
+# ═══════════════════════════════════════════════════════════════════════
+_reranker_model: Optional[CrossEncoder] = None
+
+
+def _get_reranker() -> CrossEncoder:
+    global _reranker_model
+    if _reranker_model is None:
+        model_name = getattr(settings, "reranker_model", None) or "Qwen/Qwen3-Reranker-0.6B"
+        logger.info(f"加载 ReRanker 模型: {model_name}")
+        _reranker_model = CrossEncoder(model_name)
+    return _reranker_model
+
+
+def rerank_chunks(query: str, chunks: list, top_k: int = None) -> list:
+    if not chunks:
+        return []
+
+    top_k = top_k or getattr(settings, "reranker_top_k", None) or RERANKER_TOP_K
+
+    if not getattr(settings, "reranker_enabled", False):
+        logger.debug("ReRanker 未启用，返回原始排序")
+        return chunks[:top_k]
+
+    if len(chunks) <= top_k:
+        return chunks
+
+    try:
+        reranker = _get_reranker()
+        pairs = [(query, chunk.get("content", "")) for chunk in chunks]
+        scores = reranker.predict(pairs)
+
+        for i, chunk in enumerate(chunks):
+            chunk["rerank_score"] = float(scores[i])
+
+        reranked = sorted(chunks, key=lambda x: x["rerank_score"], reverse=True)
+        logger.info(f"ReRanker 完成: {len(chunks)} → {top_k} 条，得分范围 [{min(scores):.3f}, {max(scores):.3f}]")
+        return reranked[:top_k]
+
+    except Exception as e:
+        logger.warning(f"ReRanker 失败: {e}，返回原始排序")
+        return chunks[:top_k]
+
+
+def _normalize_answer_text(raw: str) -> str:
+    """
+    解析「回答:…来源:…」格式，并剔除模型误粘贴的提示词语句（prompt 渗漏）。
+    """
+    if not raw:
+        return raw
+    text = raw.strip()
+    for marker in ("回答:", "回答："):
+        if marker in text:
+            rest = text.split(marker, 1)[1]
+            for stop in ("\n来源:", "\n来源：", "来源:", "来源："):
+                if stop in rest:
+                    rest = rest.split(stop, 1)[0]
+            text = rest.strip()
+            break
+    leak_prefixes = (
+        "## 回答要求",
+        "## 回答格式",
+        "## 参考文档",
+        "【聚合/统计类问题】",
+        "1. 基于参考文档",
+        "2. 如果文档中没",
+        "2. 仅当参考文档",
+        "3. 回答要准确",
+        "4. 【聚合",
+        "5. 【成绩",
+        "9. 【成绩",
+        "9. 【成绩/排名表】",
+        "8. 如果涉及",
+        "10. 【评价",
+        "11. 【指代整份材料】",
+        "6. 严禁把本提示",
+        "7. 只面向最终用户",
+    )
+    lines_out: List[str] = []
+    for line in text.splitlines():
+        ls = line.strip()
+        if any(ls.startswith(p) for p in leak_prefixes):
+            continue
+        if ls.startswith("回答格式") or ls in ("来源:", "来源："):
+            continue
+        lines_out.append(line)
+    cleaned = "\n".join(lines_out).strip()
+    return cleaned if cleaned else raw.strip()
+
+
+def _build_prompt(query: str, chunks: list, scenario: str = "default") -> str:
+    CHUNK_MAX_CHARS = 3000
+    CONTEXT_MAX_CHARS = 8000
+
+    # ⚠️ M3-005 修复: 句子边界切割函数，避免在句子中间截断
+    def _truncate_at_sentence(text: str, max_chars: int) -> str:
+        """在 max_chars 处或之前最近的句子边界（。！？；\n）处截断"""
+        if len(text) <= max_chars:
+            return text
+        # 向前查找最后一个句子边界
+        # 标点优先顺序：\n（段落）、。！？；（句子）
+        for sep in ["\n\n", "。\n", "！\n", "？\n", "；\n", "\n"]:
+            # 在 [max_chars - 50, max_chars] 范围内找最近的边界
+            search_start = max(0, max_chars - 100)
+            candidate = text.rfind(sep, search_start, max_chars)
+            if candidate != -1:
+                # 保留边界标点（段落分隔符需要特殊处理）
+                if sep == "\n\n":
+                    return text[:candidate + 2]
+                elif sep == "\n":
+                    return text[:candidate + 1]
+                else:
+                    return text[:candidate + len(sep)]
+        # 没有找到句子边界，直接在 max_chars 处截断（最后手段）
+        return text[:max_chars] + "…"
+
+    parts = []
+    total = 0
+    seen_files = []
+
+    for i, c in enumerate(chunks):
+        content = (c.get("content") or "").strip()
+        if not content:
+            continue
+        # ⚠️ M3-005 修复: 在句子边界处截断，而非简单字符截断
+        content = _truncate_at_sentence(content, CHUNK_MAX_CHARS)
+
+        # 用真实文件名作标签，而不是 [文档N]
+        source_file = c.get("source_file", "")
+        filename = c.get("filename") or source_file.replace("\\", "/").split("/")[-1] or f"文档{i+1}"
+        if filename not in seen_files:
+            seen_files.append(filename)
+
+        seg = f"【{filename}】\n{content}"
+        seg_len = len(seg) + 2
+        # ⚠️ M3-005 修复: 在添加前判断是否溢出，避免添加后才发现溢出
+        if total + seg_len > CONTEXT_MAX_CHARS:
+            # 尝试对当前 chunk 在句子边界处截取剩余空间
+            remaining = CONTEXT_MAX_CHARS - total - 2
+            if remaining > 50:  # 剩余空间足够放置一个句子
+                truncated_seg = f"【{filename}】\n{_truncate_at_sentence(content, remaining)}"
+                parts.append(truncated_seg)
+            break  # 空间不足，不再添加更多 chunk
+        parts.append(seg)
+        total += seg_len
+
+    context = "\n\n".join(parts)
+    # 来源列表用真实文件名
+    source_names = "、".join(f"【{fn}】" for fn in seen_files) if seen_files else "未知文件"
+
+    if scenario == "extract":
+        return f"""你是一个文档字段提取助手。请从以下文档内容中提取指定字段的值。
+
+## 文档内容
+{context}
+
+## 提取任务
+{query}
+
+## 严格要求
+1. 只输出提取到的具体值，不要任何解释、前缀或来源说明
+2. 如果文档中确实没有该字段的值，只输出：(无)
+3. 不要输出"回答:"、"值:"、"来源:"等前缀
+4. 不要编造，只从文档中提取
+
+直接输出值："""
+
+    scenario_prompts = {
+        "contract": "8. 如果涉及合同条款，请重点识别：合同金额、甲乙双方、付款方式、违约责任、有效期。",
+        "report": "8. 如果涉及报表数据，请进行数据对比、趋势描述，注明计量单位。",
+        "regulation": "8. 如果涉及法规条文，请引用相关条款，说明适用范围和时效性。",
+    }
+    extra_requirement = scenario_prompts.get(scenario, "")
+
+    # PDF 表格经纯文本提取后常丢列对齐，易把「加分」等小数字当成总分；概括类问题也会瞎编人数/极值
+    table_score_hint = ""
+    if re.search(
+        r"最高|最低|极值|排名|成绩|分数|多少分|总分|综合|"
+        r"有什么信息|都有什么|包含什么|主要内容|概括|总结|介绍下|里边|里面|有哪些",
+        query,
+    ):
+        table_score_hint = (
+            "\n9. 【成绩/排名表】若参考内容像学生成绩或推免排名表："
+            "综合成绩多为约 3～4 的小数；同一行里更小的 0.xx 常为「加分」等列，**绝不是**综合成绩的最低分，"
+            "不要把 0.1、0.05 等说成「最低分」。"
+            "问最高/最低分时只对「综合成绩」一列取极值。"
+            "总人数、最高分、最低分、名次范围等数字：**仅当参考片段里能明确核对时再写**；"
+            "若片段只是表格的一部分、未写总人数，**禁止编造**「共 N 人」，应说明「当前参考仅为排名表局部，无法从片段准确统计总人数或全表极值」。"
+            "问「有什么信息」时优先说明文档主题、列含义、排名性质；勿随口编造统计数字。"
+        )
+
+    critique_hint = ""
+    if re.search(
+        r"不好|缺点|不足|薄弱|改进|优化|问题在哪|有什么问题|写得怎样|评价|批评|指出|建议|弱项",
+        query,
+    ):
+        critique_hint = (
+            "\n10. 【评价/改进类】若用户问「哪里写得不好」「有何缺点」「如何改进」等："
+            "必须直接写出**可改进点**（例如：缺少量化成果与数据、某段与目标岗位关联弱、项目描述缺背景与结果、排版或结构不清），"
+            "不要只做简历摘要，也不要用「信息偏少」「较为简略」等空话敷衍；"
+            "若你在后文列举出某板块已有较多具体内容，就不得再称该板块「稀疏」「过少」，避免前后矛盾。"
+        )
+
+    vague_pronoun_hint = ""
+    if re.search(r"这是什么|是啥|啥玩意|什么文档|干嘛的|干什么的|介绍一下|概括一下|讲讲", query):
+        vague_pronoun_hint = (
+            "\n11. 【指代整份材料】若用户用「这」「啥」等指代当前选中的文档："
+            "必须结合参考片段上方的【文件名】与正文（表头、列名、数据形态）判断文档类型与用途，用一两句话说明"
+            "（例如：学生综合成绩排名表、推免选拔依据等）。"
+            "排名类 PDF 的正文常为学号与分数，没有单独「标题段」是正常现象，**不得**因此输出「无法回答」。"
+        )
+
+    return f"""你是一个专业的文档问答助手。请根据以下参考文档，回答用户的问题。
+
+## 参考文档
+{context}
+
+## 用户问题
+{query}
+
+## 回答要求
+1. 基于参考文档内容回答；无依据时不要编造事实性信息（如虚构公司、项目、分数）。
+2. 仅当参考文档几乎没有任何与问题相关的描述时，才输出「根据提供的信息无法回答该问题」。问「这是什么」且【文件名】或表格结构已能判断文档性质时，**不属于**「无法回答」情形。
+3. 若问题需要合理推断（例如「如果你是 HR 会问什么」「有什么建议」），而文档中有该人的经历、项目、技能、教育等可核对信息，请基于这些信息给出简要、具体的推断或问题列表，并说明依据来自文档中的哪些类型的信息。
+4. 回答要准确、简洁、有条理。
+5. 【聚合/统计类问题】若用户问「有哪些」「有几个」「列出所有」等，请归纳去重后汇总作答。
+{critique_hint}{vague_pronoun_hint}{extra_requirement}{table_score_hint}
+6. 严禁把本提示中的条款编号、小标题或「回答格式」说明复述进答案；禁止输出以「4. 【聚合」「5. 【成绩」等开头的元说明句。
+7. 只面向最终用户写作，不要解释系统规则。
+
+## 回答格式（只输出以下两行，勿添加其它章节标题）
+回答: <你的回答>
+来源: {source_names}"""
+
+
+def detect_conflicts(chunks: list) -> list:
+    """
+    从检索到的片段中扫描是否出现「同一语义字段多个不同取值」。
+    注意：名单/表格类文档里多行日期、学号、序号会被旧版宽松正则误判为冲突，
+    进而让前端显示「多源冲突」、拉低用户对答案的信任；此处已收紧规则。
+    """
+    conflicts = []
+
+    # ── 金额冲突检测 ─────────────────────────────────────────────
+    # 必须有货币单位，避免把学号、序号、年份等纯数字误判为「多个金额」
+    money_patterns = [
+        r"(\d+(?:\.\d+)?\s*万元)",
+        r"(\d+(?:\.\d+)?\s*元)",
+        r"(¥\s*\d+(?:\.\d+)?)",
+        r"(人民币\s*\d+(?:\.\d+)?\s*元?)",
+    ]
+    money_values: Dict[str, list] = {}
+    for chunk in chunks:
+        content = chunk.get("content", "")
+        for pat in money_patterns:
+            for match in re.findall(pat, content):
+                val = match.strip()
+                if val and len(val) > 1:
+                    money_values.setdefault(val, []).append(chunk.get("chunk_id", ""))
+    if len(money_values) > 1:
+        conflicts.append({
+            "key": "金额",
+            "values": list(money_values.keys()),
+            "from_chunks": list(money_values.values())
+        })
+
+    # ── 日期冲突检测（按语义类型分类）──────────────────────────────
+    # ⚠️ M3-003 修复: 按日期语义粒度分类，而非简单的数量阈值
+    # 合同中自然包含：签订日期、生效日期、终止日期、付款日期等，这些不是冲突
+    # 真正的冲突是：同一语义粒度的日期出现多个不同值（如两个不同的签订日期）
+    # 禁止裸 \d{4}：学号/排名表中的 8 位学号会被切成 5522、0323 等，误判为「多年份冲突」
+    DATE_GRANULARITY_PATTERNS = [
+        # (语义标签, 正则模式, 最小字符长度)
+        ("签订/生效日期", r"\d{4}年\d{1,2}月\d{1,2}日", 10),
+        ("签订/生效日期", r"\d{4}-\d{2}-\d{2}", 10),
+        ("签订/生效日期", r"\d{4}/\d{1,2}/\d{1,2}", 10),
+        ("年月", r"\d{4}年\d{1,2}月", 7),
+        ("年月", r"\d{4}-\d{2}", 7),
+        ("年份", r"\d{4}年", 5),
+    ]
+
+    # 按语义粒度分组计数
+    granularity_counts: Dict[str, Dict[str, list]] = {}
+    for chunk in chunks:
+        content = chunk.get("content", "")
+        chunk_id = chunk.get("chunk_id", "")
+        for label, pat, _ in DATE_GRANULARITY_PATTERNS:
+            for match in re.findall(pat, content):
+                if len(match) >= 4:
+                    granularity_counts.setdefault(label, {}).setdefault(match, []).append(chunk_id)
+
+    # 每个语义粒度下，若该粒度的日期值数量 >= 2 且来源 chunk 属于不同文档 → 报告冲突
+    # 仅跨 chunk 来源才可能是真正的多源冲突（同一 chunk 内多行日期表格不触发）
+    for label, value_map in granularity_counts.items():
+        distinct_values = list(value_map.keys())
+        if len(distinct_values) <= 1:
+            continue
+        # 获取涉及该粒度日期的所有 chunk_id
+        involved_chunks = []
+        for chunk_ids in value_map.values():
+            involved_chunks.extend(chunk_ids)
+        distinct_chunks = set(involved_chunks)
+        # 若同一语义粒度下有 >= 2 个不同值，且来自不同 chunk → 可能是冲突
+        # 但若所有 chunk 都来自同一文件（同一 chunk 列表中的多个表格行），则跳过
+        # 当前 chunks 列表中若来自同一文件且 chunk_id 前缀相同，视为同源
+        if len(distinct_values) >= 2 and len(distinct_chunks) >= 2:
+            conflicts.append({
+                "key": f"日期({label})",
+                "values": distinct_values,
+                "from_chunks": [value_map[v] for v in distinct_values]
+            })
+
+    # ── 比例冲突检测 ─────────────────────────────────────────────
+    # 排名表/成绩单里每行都有不同的「综合成绩占比」等百分比，出现多个不同 % 是常态，
+    # 不应视为「多源矛盾」。仅在「多份不同文档」且不同取值较少时，才可能是同一指标口径冲突。
+    ratio_patterns = [r"(\d+\.?\d*%)", r"(\d+)\s*%"]
+    ratio_values: Dict[str, list] = {}
+    for chunk in chunks:
+        content = chunk.get("content", "")
+        for pat in ratio_patterns:
+            for match in re.findall(pat, content):
+                val = match.strip()
+                if val and len(val) > 1:
+                    ratio_values.setdefault(val, []).append(chunk.get("chunk_id", ""))
+    distinct_sources = {chunk.get("source_file", "") or chunk.get("filename", "") for chunk in chunks}
+    distinct_sources.discard("")
+    many_distinct_ratios = len(ratio_values) > 6  # 典型表格：多行各不相同的百分数
+    if len(ratio_values) > 1 and len(distinct_sources) >= 2 and not many_distinct_ratios:
+        conflicts.append({
+            "key": "比例",
+            "values": list(ratio_values.keys()),
+            "from_chunks": list(ratio_values.values())
+        })
+
+    # ── 公司名冲突检测 ──────────────────────────────────────────
+    company_patterns = [r"([^\s]{4,}公司)", r"([^\s]{2,}贸易)", r"([^\s]{2,}科技)"]
+    company_values: Dict[str, list] = {}
+    for chunk in chunks:
+        content = chunk.get("content", "")
+        for pat in company_patterns:
+            for match in re.findall(pat, content):
+                val = match.strip()
+                if val and len(val) > 3:
+                    company_values.setdefault(val, []).append(chunk.get("chunk_id", ""))
+    # 公司名去重（同一公司名可能以全称和简称出现）
+    if len(company_values) > 1:
+        conflicts.append({
+            "key": "公司名",
+            "values": list(company_values.keys()),
+            "from_chunks": list(company_values.values())
+        })
+
+    return conflicts
+
+
+def fuse_results(top_chunks: list, conflicts: list) -> tuple:
+    fusion_info = {
+        "has_conflicts": len(conflicts) > 0,
+        "conflict_count": len(conflicts),
+        "conflict_details": conflicts
+    }
+
+    if not conflicts:
+        return top_chunks, fusion_info
+
+    for chunk in top_chunks:
+        chunk_id = chunk.get("chunk_id", "")
+        chunk_conflicts = []
+        for cf in conflicts:
+            for cid_list in cf["from_chunks"]:
+                if chunk_id in cid_list:
+                    chunk_conflicts.append({
+                        "key": cf["key"],
+                        "values": cf["values"]
+                    })
+        chunk["has_conflict"] = len(chunk_conflicts) > 0
+        chunk["related_conflicts"] = chunk_conflicts
+
+    return top_chunks, fusion_info
+
+
+def mmr_diversity_rerank(query: str, chunks: list, lambda_val: float = None, query_embedding: np.ndarray = None) -> list:
+    """
+    MMR (Maximal Marginal Relevance) Diversity 重排序。
+    位于 CrossEncoder 重排序之后，在相关性和多样性之间取平衡。
+
+    公式: MMR = λ·Sim(query, doc) − (1−λ)·max_Sim(doc, already_selected)
+    论文: Carbonell & Goldstein, SIGIR 1998
+
+    Args:
+        query: 用户查询
+        chunks: 已按 rerank_score 降序排列的 chunk 列表
+        lambda_val: 平衡系数，1=只看相关性，0=只看多样性，默认从配置读取
+        query_embedding: ⚠️ M3-004 修复: 传入预计算的 query embedding，MMR 直接复用
+                                而非重新编码，节省约 50% 的 embedding 时间
+    Returns:
+        经 MMR 筛选后的 chunk 列表（顺序已更新）
+    """
+    if not chunks or len(chunks) <= 2:
+        return chunks
+
+    lambda_val = lambda_val or getattr(settings, "mmr_lambda", 0.7)
+    if not getattr(settings, "mmr_enabled", False):
+        return chunks
+
+    try:
+        embed_model = _get_embed_model()
+        contents = [c.get("content", "") for c in chunks]
+
+        # chunk_embeds：无论是否传入 query_embedding，都需要编码（ChromaDB query 不返回 embedding）
+        chunk_embeds = embed_model.encode(contents, normalize_embeddings=True)
+
+        relevance_scores = np.array([c.get("rerank_score", 0.0) for c in chunks])
+        if relevance_scores.max() != relevance_scores.min():
+            relevance_scores = (relevance_scores - relevance_scores.min()) / (
+                relevance_scores.max() - relevance_scores.min()
+            )
+        else:
+            relevance_scores = np.ones_like(relevance_scores) * 0.5
+
+        selected: list = []
+        remaining = list(range(len(chunks)))
+
+        while remaining and len(selected) < len(chunks):
+            best_score = -float("inf")
+            best_idx = None
+
+            for idx in remaining:
+                # ⚠️ M3-004 修复: sim_to_query 应基于向量空间中的 query-doc 相似度
+                # 而非依赖 Reranker 的 score（score 已经是排序依据，非相似度量纲）
+                # 由于 chunk_embeds 已归一化，query_embedding 也已归一化，
+                # 点积即 cosine similarity ∈ [-1, 1]，正值越大越相似
+                if query_embedding is not None:
+                    sim_to_query = float(np.dot(query_embedding, chunk_embeds[idx]))
+                else:
+                    sim_to_query = float(relevance_scores[idx])
+
+                max_sim_to_selected = 0.0
+                if selected:
+                    selected_embeds = chunk_embeds[selected]
+                    similarities = np.dot(chunk_embeds[idx], selected_embeds.T)
+                    max_sim_to_selected = float(np.max(similarities))
+
+                mmr_score = (
+                    lambda_val * sim_to_query
+                    - (1 - lambda_val) * max_sim_to_selected
+                )
+
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_idx = idx
+
+            if best_idx is not None:
+                selected.append(best_idx)
+                remaining.remove(best_idx)
+
+        result = [chunks[i] for i in selected]
+        logger.info(
+            f"MMR Diversity 完成 (λ={lambda_val:.2f}): "
+            f"{len(chunks)} → {len(result)} 条，移除了 {len(chunks)-len(result)} 个冗余 chunk"
+        )
+        return result
+
+    except Exception as e:
+        logger.warning(f"MMR Diversity 失败: {e}，返回原始排序")
+        return chunks
+
+
+def _load_file_as_chunks(file_paths: list, file_name_map: dict = None) -> list:
+    """
+    直接读取源文件，把内容合并成少量 chunk 传给 LLM。
+    Excel/CSV：按分类列去重后，所有行合并为 1~2 个大 chunk（CSV 格式），不拆分成每行一个 chunk。
+    其他文件：按段落切分，限制数量。
+    file_name_map: {磁盘路径: 真实文件名}，优先用真实文件名展示
+    """
+    chunks = []
+    max_chunks = getattr(settings, "top_k", 10)  # 总 chunk 数不超过 TOP_K
+
+    for fp in file_paths:
+        # 优先使用数据库中的真实文件名，避免显示 UUID 磁盘名
+        disk_name = fp.replace("\\", "/").split("/")[-1]
+        filename = (file_name_map or {}).get(fp, disk_name)
+        ext = fp.rsplit(".", 1)[-1].lower()
+        try:
+            if ext in ("xlsx", "xls"):
+                import pandas as pd
+                df = pd.read_excel(fp)
+            elif ext == "csv":
+                import pandas as pd
+                df = pd.read_csv(fp)
+            else:
+                with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+                for i, para in enumerate(text.split("\n\n")):
+                    para = para.strip()
+                    if para and len(chunks) < max_chunks:
+                        chunks.append({"chunk_id": f"file_{i}", "content": para,
+                                       "source_file": fp, "page": i,
+                                       "hybrid_score": 1.0, "filename": filename})
+                continue
+
+            if df.empty:
+                continue
+
+            # 找分类列去重
+            dedup_col = None
+            for col in df.columns:
+                nunique = df[col].nunique()
+                if 1 < nunique < min(200, len(df) * 0.3):
+                    dedup_col = col
+                    break
+
+            sample_df = (df.drop_duplicates(subset=[dedup_col])
+                         if dedup_col else df.sample(n=min(50, len(df)), random_state=42))
+
+            # 把所有行合并成 CSV 格式的单个 chunk，而不是每行一个 chunk
+            # 这样 LLM 看到的是完整的表格，来源只有 1 个文件
+            csv_text = sample_df.to_csv(index=False)
+            # 若内容太长则切成 2 个 chunk
+            chunk_size = 3000
+            for ci, start in enumerate(range(0, len(csv_text), chunk_size)):
+                piece = csv_text[start:start + chunk_size]
+                chunks.append({
+                    "chunk_id": f"{filename}_{ci}",
+                    "content": piece,
+                    "source_file": fp,
+                    "page": ci,
+                    "hybrid_score": 1.0,
+                    "filename": filename,
+                })
+                if len(chunks) >= max_chunks:
+                    break
+
+            logger.info(f"直接读取文件 {filename}：{len(sample_df)} 行，生成 chunk 数: {len(chunks)}")
+        except Exception as e:
+            logger.warning(f"直接读取文件 {fp} 失败: {e}")
+
+    return chunks
+
+
+def distance_to_score(distance: float, method: str = "exp") -> float:
+    if distance is None or distance < 0:
+        return 0.0
+
+    if method == "exp":
+        return float(np.exp(-distance))
+    return 1.0 / (1.0 + distance)
+
+
+def _vector_search(query: str, query_embedding: list, file_ids: list) -> list:
+    """
+    向量检索（独立函数，供并行调用）
+    """
+    collection = get_collection()
+
+    vector_results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=settings.top_k * 2,
+        where={"file_id": {"$in": file_ids}} if file_ids else None
+    )
+
+    vector_chunks = []
+    if vector_results and vector_results.get("ids"):
+        ids = vector_results["ids"][0]
+        documents = vector_results.get("documents", [[]])[0]
+        metadatas = vector_results.get("metadatas", [[]])[0]
+        distances = vector_results.get("distances", [[]])[0]
+
+        for i, chunk_id in enumerate(ids):
+            metadata = metadatas[i] if i < len(metadatas) and metadatas[i] else {}
+            vector_chunks.append({
+                "chunk_id": chunk_id,
+                "content": documents[i] if i < len(documents) else "",
+                "source_file": metadata.get("source_file", ""),
+                "page": metadata.get("page", 0),
+                "distance": distances[i] if i < len(distances) else 0,
+                "vector_score": distance_to_score(distances[i]) if i < len(distances) else 0
+            })
+
+    logger.info(f"向量检索完成: 获取 {len(vector_chunks)} 条结果")
+    return vector_chunks
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# BM25S 运行时缓存
+# ═══════════════════════════════════════════════════════════════════════
+_BM25_CACHE_VALID = False
+_BM25_INDEX: Optional[bm25s.BM25] = None
+_BM25_CACHE_KEY = None
+_BM25_RECORDS: list = []
+_BM25_CORPUS: list = []  # BM25S 需要原始文本供 retrieve() 使用
+_BM25S_INDEX_PATH = "./db/bm25s_index"
+
+
+def invalidate_bm25_runtime_cache():
+    global _BM25_CACHE_VALID, _BM25_INDEX, _BM25_CACHE_KEY, _BM25_RECORDS, _BM25_CORPUS
+    _BM25_CACHE_VALID = False
+    _BM25_INDEX = None
+    _BM25_CACHE_KEY = None
+    _BM25_RECORDS = []
+    _BM25_CORPUS = []
+    logger.info("BM25S 运行时缓存已失效")
+
+
+def _ensure_bm25_ready(file_ids: list = None):
+    global _BM25_INDEX, _BM25_CORPUS, _BM25_CACHE_VALID, _BM25_CACHE_KEY, _BM25_RECORDS
+
+    cache_key = tuple(sorted(file_ids)) if file_ids else "__all__"
+
+    if _BM25_CACHE_VALID and _BM25_INDEX is not None and _BM25_CACHE_KEY == cache_key:
+        return
+
+    records = get_bm25_records(file_ids)
+    _BM25_RECORDS = records
+
+    if not records:
+        _BM25_INDEX = None
+        _BM25_CORPUS = []
+        _BM25_CACHE_VALID = True
+        _BM25_CACHE_KEY = cache_key
+        return
+
+    corpus = [r["content"] for r in records]
+    _BM25_CORPUS = corpus
+
+    # 尝试从持久化文件加载（文件名含记录数，记录数变化时自动失效）
+    method = getattr(settings, "bm25s_method", "robertson")
+    index_file = f"{_BM25S_INDEX_PATH}_{cache_key}_n{len(records)}.pt"
+    corpus_file = f"{_BM25S_INDEX_PATH}_{cache_key}_corpus.json"
+
+    import os, glob
+    if os.path.exists(index_file):
+        try:
+            _BM25_INDEX = bm25s.BM25.load(index_file, load_corpus=True)
+            _BM25_CACHE_VALID = True
+            _BM25_CACHE_KEY = cache_key
+            logger.info(f"BM25S 从持久化加载: {len(records)} 条")
+            return
+        except Exception as e:
+            logger.warning(f"BM25S 持久化加载失败，重新构建: {e}")
+
+    # 构建索引
+    corpus_tokens = bm25s.tokenize(corpus, stopwords=None)
+    _BM25_INDEX = bm25s.BM25(method=method)
+    _BM25_INDEX.index(corpus_tokens)
+
+    # 持久化保存（先删同 cache_key 的旧文件）
+    try:
+        for old in glob.glob(f"{_BM25S_INDEX_PATH}_{cache_key}_n*.pt"):
+            try:
+                os.remove(old)
+            except Exception:
+                pass
+        os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
+        _BM25_INDEX.save(index_file)
+        logger.info(f"BM25S 持久化已保存: {index_file}")
+    except Exception as e:
+        logger.warning(f"BM25S 持久化失败: {e}")
+
+    _BM25_CACHE_VALID = True
+    _BM25_CACHE_KEY = cache_key
+    logger.info(f"BM25S 索引构建完成: {len(records)} 条, method={method}")
+
+
+def _bm25_search(query: str, file_ids: list = None) -> Tuple[dict, dict]:
+    """
+    BM25S 检索（独立函数，供并行调用）
+    支持 file_ids 过滤，并直接返回 chunk_id -> score 映射
+    """
+    _ensure_bm25_ready(file_ids)
+
+    bm25_scores_map = {}
+    bm25_doc_map = {}
+
+    if not _BM25_RECORDS or _BM25_INDEX is None:
+        return bm25_scores_map, bm25_doc_map
+
+    # BM25S 内置分词，同时支持中文 jieba
+    query_tokens = list(jieba.cut(query))
+    query_tokens = [t.strip() for t in query_tokens if t.strip()]
+    logger.info(f"BM25S 分词结果: query='{query}' -> {query_tokens}")
+
+    # retrieve 返回 namedtuple(result.documents, result.scores)，k=None 取全部
+    # BM25S.load(load_corpus=True) 会把 corpus 存入对象内部，corpus=None 则自动用内部的
+    result = _BM25_INDEX.retrieve(
+        [query_tokens],
+        corpus=None,
+        k=len(_BM25_CORPUS),
+        return_as="tuple",
+    )
+    doc_ids = result.documents[0] if len(result.documents) else []
+    scores = result.scores[0] if len(result.scores) else []
+
+    for idx, score in zip(doc_ids, scores):
+        idx_int = int(idx)
+        if idx_int < len(_BM25_RECORDS):
+            record = _BM25_RECORDS[idx_int]
+            chunk_id = record["chunk_id"]
+            bm25_scores_map[chunk_id] = float(score)
+            bm25_doc_map[chunk_id] = {
+                "content": record["content"],
+                "file_id": record["file_id"],
+                "source_file": record["source_file"],
+                "page": record["page"],
+            }
+
+    logger.info(f"BM25S 检索完成: {len(bm25_scores_map)} 条得分")
+    return bm25_scores_map, bm25_doc_map
+
+
+def reciprocal_rank_fusion(results_list: list, k: int = 60) -> dict:
+    """
+    Reciprocal Rank Fusion (RRF) — Google 提出的无参检索融合方法。
+    不依赖得分绝对值，只依赖排名顺序，对各路检索结果一视同仁。
+    公式: RRF(d) = Σ 1/(k + rank(d))
+
+    Args:
+        results_list: 各路检索的已排序结果列表（每个元素是 dict，需有 chunk_id）
+        k: RRF 超参数，默认 60。值越大，各路结果的权重越趋于均等。
+    Returns:
+        chunk_id -> rrf_score 的映射，按分降序排列
+    """
+    scores: dict = {}
+
+    for results in results_list:
+        if not results:
+            continue
+        for rank, item in enumerate(results):
+            chunk_id = item.get("chunk_id")
+            if chunk_id:
+                scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)
+
+    sorted_chunk_ids = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return dict(sorted_chunk_ids)
+
+
+def _hybrid_retrieve(query: str, file_ids: list, file_paths: list = None, file_name_map: dict = None) -> list:
+    """
+    混合检索：
+    - 若提供 file_paths 且文件为结构化表格（Excel/CSV），直接读文件取多样性样本，跳过向量检索
+    - 否则走向量+BM25混合检索
+    """
+    # 判断是否有结构化文件可直接读取
+    structured_exts = {"xlsx", "xls", "csv"}
+    if file_paths:
+        structured = [fp for fp in file_paths if fp.rsplit(".", 1)[-1].lower() in structured_exts]
+        if structured:
+            logger.info(f"检测到结构化文件，直接读取跳过向量检索: {structured}")
+            direct_chunks = _load_file_as_chunks(structured, file_name_map=file_name_map)
+            # 非结构化文件仍走向量检索
+            other = [fp for fp in file_paths if fp not in structured]
+            if other:
+                pass  # 暂不处理混合情况
+            if direct_chunks:
+                return direct_chunks
+    model = _get_embed_model()
+    query_embedding = model.encode(query)
+    # 同时保留 list 供 ChromaDB query 使用，和 ndarray 供 MMR 使用
+    query_embedding_list = query_embedding.tolist()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        vector_future = executor.submit(_vector_search, query, query_embedding_list, file_ids)
+        bm25_future = executor.submit(_bm25_search, query, file_ids)
+
+        vector_chunks = vector_future.result()
+        bm25_scores_map, bm25_doc_map = bm25_future.result()
+
+    candidate_map = {}
+
+    for vc in vector_chunks:
+        chunk_id = vc["chunk_id"]
+        candidate_map[chunk_id] = {
+            "chunk_id": chunk_id,
+            "content": vc.get("content", ""),
+            "source_file": vc.get("source_file", ""),
+            "page": vc.get("page", 0),
+            "distance": vc.get("distance", 0),
+            "vector_score": float(vc.get("vector_score", 0.0)),
+            "bm25_score": float(bm25_scores_map.get(chunk_id, 0.0)),
+        }
+
+    bm25_ranked = sorted(
+        bm25_scores_map.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )[: settings.top_k * 3]
+
+    # ⚠️ 修复 M3-001: 当 chunk 同时被向量检索和 BM25 命中时，
+    # 应同时保留两个维度的得分，而非忽略 BM25 得分
+    for chunk_id, bm25_score in bm25_ranked:
+        if chunk_id in candidate_map:
+            # chunk 已存在于 candidate_map（被向量检索命中），更新其 BM25 得分
+            # 确保后续的 RRF/线性融合能同时考虑两个维度的排名
+            candidate_map[chunk_id]["bm25_score"] = float(bm25_score)
+        else:
+            # chunk 仅被 BM25 命中（向量检索未召回），添加为候选
+            doc_info = bm25_doc_map.get(chunk_id, {})
+            candidate_map[chunk_id] = {
+                "chunk_id": chunk_id,
+                "content": doc_info.get("content", ""),
+                "source_file": doc_info.get("source_file", ""),
+                "page": doc_info.get("page", 0),
+                "distance": None,
+                "vector_score": 0.0,
+                "bm25_score": float(bm25_score),
+            }
+
+    candidates = list(candidate_map.values())
+    if not candidates:
+        return []
+
+    fusion_method = getattr(settings, "fusion_method", "rrf")
+
+    if fusion_method == "rrf":
+        rrf_k = getattr(settings, "rrf_k", 60)
+
+        vector_ranked = sorted(
+            [c for c in candidates if c.get("vector_score", 0) > 0 or c.get("distance") is not None],
+            key=lambda x: x.get("vector_score", 0),
+            reverse=True
+        )
+        bm25_ranked = sorted(
+            [c for c in candidates if c.get("bm25_score", 0) > 0],
+            key=lambda x: x.get("bm25_score", 0),
+            reverse=True
+        )
+
+        rrf_scores = reciprocal_rank_fusion([vector_ranked, bm25_ranked], k=rrf_k)
+
+        for c in candidates:
+            c["hybrid_score"] = float(rrf_scores.get(c["chunk_id"], 0.0))
+
+        candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)
+        logger.info(f"RRF 融合完成 (k={rrf_k}), vector_rank={len(vector_ranked)}, bm25_rank={len(bm25_ranked)}")
+    else:
+        # ⚠️ M3-002 修复: 明确标注 linear 融合为实验性功能
+        # linear 模式使用自适应权重（短查询偏 BM25，长查询偏向量），
+        # 通过 Min-Max 归一化将两路得分映射到 [0,1] 后加权求和。
+        # RRF 模式（默认）因无需归一化、参数少、效果稳定，优先推荐使用。
+        logger.warning(
+            "[HYBRID] 使用了 fusion_method='linear'，这是实验性功能。"
+            "推荐使用 fusion_method='rrf'（默认），效果更稳定。"
+        )
+        weight_vector, weight_bm25 = get_adaptive_weights(query)
+
+        vector_scores = [c["vector_score"] for c in candidates]
+        bm25_scores = [c["bm25_score"] for c in candidates]
+
+        vector_norm = _normalize_scores(vector_scores)
+        bm25_norm = _normalize_scores(bm25_scores)
+
+        for i, c in enumerate(candidates):
+            c["vector_score_norm"] = vector_norm[i]
+            c["bm25_score_norm"] = bm25_norm[i]
+            c["hybrid_score"] = (
+                c["vector_score_norm"] * weight_vector +
+                c["bm25_score_norm"] * weight_bm25
+            )
+
+        candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)
+
+    # 去重：优先按 chunk_id；若 chunk_id 不同但 content 一样，也只保留分高的
+    deduped = []
+    seen_contents = set()
+    for c in candidates:
+        content_key = (c.get("content") or "").strip()
+        if content_key and content_key in seen_contents:
+            continue
+        if content_key:
+            seen_contents.add(content_key)
+        deduped.append(c)
+
+    top_chunks = deduped[: settings.top_k * 2]
+    top_chunks = rerank_chunks(query, top_chunks, top_k=settings.top_k)
+    # ⚠️ M3-004 修复: 传入 query_embedding ndarray，消除 MMR 二次编码
+    top_chunks = mmr_diversity_rerank(query, top_chunks, query_embedding=query_embedding)
+
+    # 向量/BM25 路径：用 file_name_map 把 UUID basename 替换成真实文件名
+    if file_name_map:
+        for c in top_chunks:
+            if not c.get("filename"):
+                src = c.get("source_file", "")
+                # source_file 可能是 basename 或完整路径，两种都查
+                real = file_name_map.get(src) or file_name_map.get(src.replace("\\", "/").split("/")[-1])
+                if real:
+                    c["filename"] = real
+
+    logger.info(
+        f"混合检索完成: vector={len(vector_chunks)}, bm25={len(bm25_scores_map)}, "
+        f"merged={len(candidates)}, deduped={len(deduped)}, top={len(top_chunks)}"
+    )
+    return top_chunks
+
+
+def retrieve_and_answer(query: str, file_ids: list, file_paths: list = None,
+                        scenario: str = "default", file_name_map: dict = None) -> dict:
+    """
+    混合检索（向量+BM25）→ 重排序 → 冲突检测 → 融合 → 调LLM生成答案
+    file_paths: 由 API 层从 DB 查出，结构化文件直接读取，无需向量检索
+    file_name_map: {磁盘路径: 真实文件名}，用于在来源中显示可读文件名
+    """
+    logger.info(f"收到问答请求: query={query}, file_ids={file_ids}")
+
+    from modules.cache.redis_client import get_cached_result, set_cached_result
+
+    cache_key_raw = f"{query}|{sorted(file_ids)}|{scenario}"
+    query_hash = hashlib.md5(cache_key_raw.encode()).hexdigest()
+    # key 格式含 file_ids，便于后续按 file_id 精准清缓存
+    file_ids_str = ",".join(sorted(file_ids)) if file_ids else "all"
+    cache_key = f"a23:query:{query_hash}:fi:{file_ids_str}"
+
+    cached = get_cached_result(cache_key)
+    if cached:
+        logger.info("返回缓存结果，跳过检索")
+        return cached
+
+    try:
+        start_time = time.time()
+        top_chunks = _hybrid_retrieve(query, file_ids, file_paths=file_paths, file_name_map=file_name_map)
+        elapsed = time.time() - start_time
+        logger.info(f"检索完成，耗时: {elapsed:.2f}s, top_chunks={len(top_chunks)}")
+
+        if not top_chunks:
+            result = {
+                "query": query,
+                "answer": "根据提供的信息无法回答该问题。",
+                "sources": [],
+                "confidence": -1,
+                "fusion": {
+                    "has_conflicts": False,
+                    "conflict_count": 0,
+                    "conflict_details": []
+                }
+            }
+            set_cached_result(cache_key, result)
+            return result
+
+        conflicts = detect_conflicts(top_chunks)
+        if conflicts:
+            logger.info(f"检测到 {len(conflicts)} 处冲突")
+            for cf in conflicts:
+                logger.info(f"  冲突字段: {cf['key']}, 出现值: {cf['values']}")
+
+        prompt = _build_prompt(query, top_chunks, scenario=scenario)
+
+        llm_client = OpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url
+        )
+
+        response = llm_client.chat.completions.create(
+            model=settings.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=1500
+        )
+
+        answer = _normalize_answer_text((response.choices[0].message.content or "").strip())
+
+        avg_score = float(np.mean([c["hybrid_score"] for c in top_chunks])) if top_chunks else 0.0
+        ref_score = float(max(c["hybrid_score"] for c in top_chunks)) if top_chunks else 0.0
+        # RRF 绝对值约 0.015～0.06，线性映射到 0.15～0.95，避免界面长期显示「2%」造成误判
+        strength = max(avg_score, ref_score * 0.9)
+        confidence = (
+            round(min(0.95, max(0.15, 0.15 + min(1.0, strength / 0.048) * 0.8)), 2)
+            if top_chunks
+            else -1
+        )
+
+        top_chunks, fusion_info = fuse_results(top_chunks, conflicts)
+
+        sources = [
+            {
+                "chunk_id": c["chunk_id"],
+                "content": c["content"],
+                "source_file": c.get("filename") or c["source_file"],  # 优先用真实文件名
+                "page": c["page"],
+                # RRF 等融合分绝对值较小，供前端在「本批片段」内做相对相关度展示（勿与旧版假 80% 混淆）
+                "score": float(c.get("hybrid_score", 0.0)),
+            }
+            for c in top_chunks
+        ]
+
+        result = {
+            "query": query,
+            "answer": answer,
+            "sources": sources,
+            "confidence": confidence,
+            "fusion": fusion_info
+        }
+
+        logger.info(f"问答完成: confidence={result['confidence']}, has_conflicts={fusion_info['has_conflicts']}")
+        set_cached_result(cache_key, result)
+        return result
+
+    except Exception as e:
+        logger.exception(f"问答处理异常: {e}")
+        from tests.mock_data import MOCK_ANSWER_RESULT
+        mock = copy.deepcopy(MOCK_ANSWER_RESULT)
+        mock["query"] = query
+        mock["answer"] = f"抱歉，处理您的问题时遇到问题: {str(e)}"
+        mock["confidence"] = -1
+        mock["fusion"] = {"has_conflicts": False, "conflict_count": 0, "conflict_details": []}
+        return mock
