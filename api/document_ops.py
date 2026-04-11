@@ -164,7 +164,6 @@ async def operate_document(body: OperationRequest, db: Session = Depends(get_db)
             "reasoning": operation.reasoning,
             "instruction": body.instruction,
             "result": result,
-            "backup_path": backup_path,
             "download_url": f"/api/document/download_uploaded/{body.file_id}" if result.get("success", False) else None,
         }
     except Exception as e:

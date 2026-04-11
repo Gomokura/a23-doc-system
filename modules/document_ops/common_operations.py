@@ -527,13 +527,9 @@ class OperationExecutor:
             )
         
         elif op_type == OperationType.DELETE_PARAGRAPH:
-            position = params.get('position')
-            if not position:
-                return {
-                    'success': False,
-                    'message': '未能确定要删除的段落位置，请明确说明“第几段”或“最后一段”'
-                }
-            return self.ops.delete_paragraph(position=position)
+            return self.ops.delete_paragraph(
+                position=params.get('position', '第1段')
+            )
         
         elif op_type == OperationType.EXTRACT_CONTENT:
             return self.ops.extract_content(
