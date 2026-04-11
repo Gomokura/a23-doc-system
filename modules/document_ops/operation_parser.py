@@ -129,7 +129,8 @@ class OperationParser:
         if self.client is None:
             self.client = OpenAI(
                 api_key=settings.llm_api_key,
-                base_url=settings.llm_base_url
+                base_url=settings.llm_base_url,
+                default_headers=settings.openai_default_headers
             )
         return self.client
     

@@ -59,7 +59,11 @@ def extract_template_fields(template_path: str) -> dict:
     if not raw_text.strip():
         return {"fields": [], "method": "llm"}
 
-    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+    client = OpenAI(
+        api_key=settings.llm_api_key, 
+        base_url=settings.llm_base_url,
+        default_headers=settings.openai_default_headers
+    )
     prompt = f"""以下是一个待填写的表格/文档模板内容。请识别出其中所有需要填写数据的字段名称。
 字段可能是表格列标题、表单标签、空白行前的描述文字等。
 
@@ -204,7 +208,11 @@ def _extract_values_by_llm(fields: list, source_text: str, max_rows: int = 5) ->
     if not fields or not source_text.strip():
         return []
 
-    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+    client = OpenAI(
+        api_key=settings.llm_api_key, 
+        base_url=settings.llm_base_url,
+        default_headers=settings.openai_default_headers
+    )
 
     MAX_SOURCE = 12000
     if len(source_text) > MAX_SOURCE:

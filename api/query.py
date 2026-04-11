@@ -180,7 +180,11 @@ async def ask_stream(body: dict, db: Session = Depends(get_db)):
                 return
 
             prompt = _build_prompt(query, top_chunks, scenario=scenario)
-            llm_client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+            llm_client = OpenAI(
+                api_key=settings.llm_api_key, 
+                base_url=settings.llm_base_url,
+                default_headers=settings.openai_default_headers
+            )
 
             stream = llm_client.chat.completions.create(
                 model=settings.llm_model,

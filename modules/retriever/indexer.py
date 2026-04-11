@@ -37,10 +37,15 @@ class OllamaEmbedder:
 
         all_vecs: list = []
         for text in sentences:
+            _headers = {}
+            if self._base_url and "ngrok" in self._base_url:
+                _headers["ngrok-skip-browser-warning"] = "true"
+
             # /v1/embeddings 为 OpenAI 兼容接口，字段必须是 input，不能用 prompt（prompt 仅用于 /api/embeddings）
             resp = _requests.post(
                 f"{self._base_url}/v1/embeddings",
                 json={"model": self._model, "input": text},
+                headers=_headers,
                 timeout=120,
             )
             resp.raise_for_status()

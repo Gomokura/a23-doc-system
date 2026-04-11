@@ -1040,7 +1040,8 @@ def retrieve_and_answer(query: str, file_ids: list, file_paths: list = None,
 
         llm_client = OpenAI(
             api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url
+            base_url=settings.llm_base_url,
+            default_headers=settings.openai_default_headers
         )
 
         response = llm_client.chat.completions.create(
@@ -1097,3 +1098,4 @@ def retrieve_and_answer(query: str, file_ids: list, file_paths: list = None,
         mock["confidence"] = -1
         mock["fusion"] = {"has_conflicts": False, "conflict_count": 0, "conflict_details": []}
         return mock
+

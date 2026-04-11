@@ -8,8 +8,14 @@ from pydantic_settings import BaseSettings
 # 项目根目录（自动计算，无论从哪里启动都正确）
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-
 class Settings(BaseSettings):
+    @property
+    #在kaggle运行需要经过ngrok，绕过人工点击
+    def openai_default_headers(self) -> dict | None:
+        if self.llm_base_url and "ngrok" in self.llm_base_url:
+            return {"ngrok-skip-browser-warning": "true"}
+        return None
+
     # LLM 配置（使用硅基流动云端 API）
     llm_api_key:  str = ""  # 请在 .env 中配置 LLM_API_KEY，禁止在此硬编码
     llm_base_url: str = "https://api.siliconflow.cn/v1"

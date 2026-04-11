@@ -477,7 +477,11 @@ async def _llm_extract_fields(text_content: str, file_type: str) -> list[str]:
 {text_content[:3000]}
 """
 
-    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+    client = OpenAI(
+        api_key=settings.llm_api_key, 
+        base_url=settings.llm_base_url,
+        default_headers=settings.openai_default_headers
+    )
     resp = client.chat.completions.create(
         model=settings.llm_model,
         messages=[{"role": "user", "content": prompt}],
