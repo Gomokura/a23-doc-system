@@ -134,14 +134,23 @@ async def operate_document(body: OperationRequest, db: Session = Depends(get_db)
     """
     # 获取文件记录
     record = _get_file_record(body.file_id, db)
-    
+
+    # PDF 不支持
+    if record.file_type == "pdf":
+        return {
+            "success": False,
+            "message": "PDF 格式暂不支持文档操作，请先将 PDF 转换为 Word 文档后再试。",
+            "instruction": body.instruction,
+            "backup_path": None
+        }
+
     # 创建备份
     backup_path = None
     if body.create_backup:
         backup_path = _create_backup(record.file_path)
-    
-    # 解析指令
-    operation = parse_operation(body.instruction, record.file_type)
+
+    # 解析指令（关键：传入 file_path，让 LLM 解析时能看到文档段落列表）
+    operation = parse_operation(body.instruction, record.file_type, file_path=record.file_path)
     
     if operation.operation_type == "unknown":
         return {
@@ -175,7 +184,7 @@ async def operate_document(body: OperationRequest, db: Session = Depends(get_db)
 class PreviewRequest(BaseModel):
     """预览操作请求（不需要真实文件）"""
     instruction: str = Field(..., description="自然语言操作指令")
-    file_type: Optional[str] = Field("docx", description="文件类型: docx/xlsx")
+    file_type: Optional[str] = Field("docx", description="文件类型: docx/xlsx/pdf")
 
 
 @router.post("/preview", summary="预览操作结果")
@@ -192,6 +201,15 @@ async def preview_operation(body: PreviewRequest, db: Session = Depends(get_db))
         "file_type": "docx"
     }
     """
+    if body.file_type == "pdf":
+        return {
+            "instruction": body.instruction,
+            "file_type": body.file_type,
+            "parsed_operation": None,
+            "supported": False,
+            "error": "PDF 格式暂不支持文档操作"
+        }
+
     # 解析指令（不验证文件）
     operation = parse_operation(body.instruction, body.file_type)
 
@@ -467,26 +485,37 @@ async def batch_operations(body: BatchOperationRequest, db: Session = Depends(ge
     指令按顺序执行，遇到失败会停止
     """
     record = _get_file_record(body.file_id, db)
-    
+
+    # PDF 不支持
+    if record.file_type == "pdf":
+        return {
+            "success": False,
+            "message": f"PDF 格式暂不支持批量操作，第 1 条指令: {body.instructions[0] if body.instructions else ''}",
+            "completed_count": 0,
+            "results": [],
+            "backup_path": None
+        }
+
     # 创建备份
     backup_path = _create_backup(record.file_path)
-    
+
     results = []
-    
-    for i, instruction in enumerate(body.instructions):
-        operation = parse_operation(instruction, record.file_type)
-        
-        if operation.operation_type == "unknown":
-            return {
-                "success": False,
-                "message": f"第 {i+1} 条指令无法识别: {instruction}",
-                "completed_count": i,
-                "results": results,
-                "backup_path": backup_path
-            }
-        
-        executor = OperationExecutor(record.file_path, record.file_type)
-        try:
+
+    # 只创建一次 executor，循环复用
+    executor = OperationExecutor(record.file_path, record.file_type)
+    try:
+        for i, instruction in enumerate(body.instructions):
+            operation = parse_operation(instruction, record.file_type, file_path=record.file_path)
+
+            if operation.operation_type == "unknown":
+                return {
+                    "success": False,
+                    "message": f"第 {i+1} 条指令无法识别: {instruction}",
+                    "completed_count": i,
+                    "results": results,
+                    "backup_path": backup_path
+                }
+
             result = executor.execute(operation)
             results.append({
                 "index": i + 1,
@@ -494,7 +523,7 @@ async def batch_operations(body: BatchOperationRequest, db: Session = Depends(ge
                 "operation_type": operation.operation_type,
                 "result": result
             })
-            
+
             if not result.get("success", False):
                 return {
                     "success": False,
@@ -503,9 +532,9 @@ async def batch_operations(body: BatchOperationRequest, db: Session = Depends(ge
                     "results": results,
                     "backup_path": backup_path
                 }
-        finally:
-            executor.close()
-    
+    finally:
+        executor.close()
+
     return {
         "success": True,
         "message": f"成功执行 {len(results)} 条指令",
