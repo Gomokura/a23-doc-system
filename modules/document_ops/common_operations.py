@@ -404,6 +404,51 @@ class DocumentSplitter:
 # ─────────────────────────────────────────────────────────────────────────────
 # 操作执行器 - 核心调度器
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 参数归一化
+# ─────────────────────────────────────────────────────────────────────────────
+def _normalize_docx_params(op_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """兼容预览/LLM 输出的多种参数结构，转换为 docx 执行器可识别格式。"""
+    normalized = dict(params or {})
+
+    if op_type != OperationType.FORMAT_PARAGRAPH:
+        return normalized
+
+    paragraphs = normalized.get('paragraphs') or []
+    if isinstance(paragraphs, list) and paragraphs:
+        first = paragraphs[0] or {}
+        if not normalized.get('position') and first.get('index') is not None:
+            try:
+                normalized['position'] = f"第{int(first['index'])}段"
+            except Exception:
+                pass
+        style = str(first.get('style') or '').upper()
+        if style == 'BOLD_RED':
+            normalized.setdefault('bold', True)
+            normalized.setdefault('color', 'FF0000')
+        elif style == 'BOLD':
+            normalized.setdefault('bold', True)
+        elif style == 'RED':
+            normalized.setdefault('color', 'FF0000')
+
+    if not normalized.get('position') and normalized.get('index') is not None:
+        try:
+            normalized['position'] = f"第{int(normalized['index'])}段"
+        except Exception:
+            pass
+
+    style = str(normalized.get('style') or '').upper()
+    if style == 'BOLD_RED':
+        normalized.setdefault('bold', True)
+        normalized.setdefault('color', 'FF0000')
+    elif style == 'BOLD':
+        normalized.setdefault('bold', True)
+    elif style == 'RED':
+        normalized.setdefault('color', 'FF0000')
+
+    return normalized
+
+
 class OperationExecutor:
     """
     操作执行器
@@ -454,6 +499,7 @@ class OperationExecutor:
     
     def _execute_docx_operation(self, op_type: str, params: Dict) -> Dict[str, Any]:
         """执行 Word 文档操作"""
+        params = _normalize_docx_params(op_type, params)
         
         if op_type == OperationType.EDIT_PARAGRAPH:
             return self.ops.edit_paragraph(

@@ -104,17 +104,18 @@ class WordDocumentOperations:
             (paragraph_index, paragraph_object)
         """
         paras = self._get_paragraphs()
+        position = str(position or '').strip()
         
         if not paras:
             return -1, None
         
-        # 开头/开头
-        if '开头' in position or '第一' in position:
-            return 0, paras[0]
-        
-        # 结尾/末尾
-        if '结尾' in position or '末尾' in position:
+        # 结尾/末尾/最后
+        if '结尾' in position or '末尾' in position or '最后' in position:
             return len(paras) - 1, paras[-1]
+
+        # 开头/第一
+        if '开头' in position or position == '第一段' or position == '第一节' or position == '第一条':
+            return 0, paras[0]
         
         # 提取数字
         para_num = chinese_to_number(position)

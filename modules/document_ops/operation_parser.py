@@ -226,7 +226,7 @@ class OperationParser:
         params = {}
         
         # 提取段落/位置信息
-        para_match = re.search(r'第[一二三四五六七八九十\d]+[段节条章]', instruction)
+        para_match = re.search(r'第[一二三四五六七八九十\d]+[段节条章行]', instruction)
         if para_match:
             params['position'] = para_match.group()
         

@@ -1,43 +1,29 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { parseResponseJson } from '@/utils/parseApiResponse'
+import { useQueryStore } from '@/stores/query'
+import type { QueryResult } from '@/stores/query'
 
-interface Evidence {
-  filename: string
-  page: number
-  content: string
-  relevance: number
-  confidence: number
-}
+const store = useQueryStore()
 
-interface ConflictDetail {
-  description?: string
-  field?: string
-  values?: string[]
-}
-
-interface QueryResult {
-  answer: string
-  confidence: number
-  sources: Evidence[]
-  hasConflicts: boolean
-  conflictCount: number
-  conflictDetails: ConflictDetail[]
-  explanation: {
-    why: string
-    alternatives: string
-    credibility: string
-  }
-}
-
-const query = ref('')
-const fileIds = ref<string[]>([])
-const filesList = ref<{ file_id: string; filename: string; status: string }[]>([])
+// ── 本地 UI 状态（不需要跨 tab 保留） ────────────────────────
 const loading = ref(false)
 const expandedSources = ref<Set<number>>(new Set())
 
-const result = ref<QueryResult | null>(null)
+// ── 从 store 读写的状态（切 tab 后保留） ─────────────────────
+const query = computed({
+  get: () => store.lastQuery,
+  set: (v) => store.setQuery(v),
+})
+
+const fileIds = computed({
+  get: () => store.selectedFileIds,
+  set: (v) => store.setSelectedFileIds(v),
+})
+
+const result = computed(() => store.lastResult)
+const filesList = computed(() => store.filesList)
 
 const toggleSource = (index: number) => {
   if (expandedSources.value.has(index)) {
@@ -148,7 +134,7 @@ const handleQuery = async () => {
         confidence,
       }))
 
-    result.value = {
+    store.setResult({
       answer: data.answer || '无法生成答案',
       confidence,
       hasConflicts,
@@ -166,7 +152,7 @@ const handleQuery = async () => {
           ? '答案置信度高，来源可靠'
           : '答案仅供参考，建议进一步核实',
       },
-    }
+    })
     ElMessage.success('查询成功')
   } catch (error: any) {
     ElMessage.error(error.message || '查询失败')
@@ -183,7 +169,7 @@ const handleRefresh = async () => {
       ElMessage.error((data as any).detail || `刷新文件列表失败 (${response.status})`)
       return
     }
-    filesList.value = (data.files || []).filter((f: any) => f.status === 'indexed')
+    store.setFilesList((data.files || []).filter((f: any) => f.status === 'indexed'))
   } catch (e: any) {
     ElMessage.error(e?.message || '刷新文件列表失败')
   }
@@ -203,9 +189,11 @@ const handleClearCache = async () => {
 }
 
 const toggleFile = (fileId: string) => {
-  const idx = fileIds.value.indexOf(fileId)
-  if (idx === -1) fileIds.value.push(fileId)
-  else fileIds.value.splice(idx, 1)
+  const current = [...store.selectedFileIds]
+  const idx = current.indexOf(fileId)
+  if (idx === -1) current.push(fileId)
+  else current.splice(idx, 1)
+  store.setSelectedFileIds(current)
 }
 
 const extractFilename = (path: string) => {
@@ -214,9 +202,18 @@ const extractFilename = (path: string) => {
 }
 
 // 页面打开时加载，之后每10秒自动刷新文件列表
+let refreshTimer: ReturnType<typeof setInterval> | null = null
+
 onMounted(() => {
   handleRefresh()
-  setInterval(handleRefresh, 10000)
+  refreshTimer = setInterval(handleRefresh, 10000)
+})
+
+onUnmounted(() => {
+  if (refreshTimer) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
+  }
 })
 </script>
 

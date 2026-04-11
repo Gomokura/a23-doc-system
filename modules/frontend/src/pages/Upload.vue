@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { parseResponseJson } from '@/utils/parseApiResponse'
 
@@ -286,13 +286,7 @@ const pollReParseStatus = async (taskId: string) => {
       stopReParsePoll()
       ElMessage.error('重新解析失败: ' + (data.error || '未知错误'))
     } else {
-      // pending / processing：继续轮询
-      const msg = data.status === 'pending'
-        ? '排队中...'
-        : data.status === 'processing'
-          ? `解析进度 ${data.progress ?? 0}%`
-          : ''
-      ElMessage.info(msg)
+      // pending / processing：静默轮询，不重复弹消息打扰用户
       reparsePollTimer.value = setTimeout(() => pollReParseStatus(taskId), 3000)
     }
   } catch {
@@ -329,6 +323,42 @@ const handleBatchParse = async () => {
   }
 }
 
+// ── 拖拽上传 ──────────────────────────────────────────────
+const isDragging = ref(false)
+
+const handleDragOver = (e: DragEvent) => {
+  e.preventDefault()
+  isDragging.value = true
+}
+
+const handleDragLeave = () => {
+  isDragging.value = false
+}
+
+const handleDrop = (e: DragEvent) => {
+  e.preventDefault()
+  isDragging.value = false
+  const dropped = e.dataTransfer?.files?.[0]
+  if (!dropped) return
+  const allowed = ['.pdf', '.docx', '.xlsx', '.txt', '.md', '.xls']
+  const ext = '.' + dropped.name.split('.').pop()?.toLowerCase()
+  if (!allowed.includes(ext)) {
+    ElMessage.warning('不支持该文件类型，请上传 PDF / DOCX / XLSX / TXT / MD')
+    return
+  }
+  file.value = dropped
+  ElMessage.success(`已选择：${dropped.name}`)
+}
+
+// ── 生命周期 ──────────────────────────────────────────────
+onMounted(() => {
+  loadHistory()
+})
+
+onUnmounted(() => {
+  stopPolling()
+  stopReParsePoll()
+})
 </script>
 
 <template>
@@ -354,12 +384,18 @@ const handleBatchParse = async () => {
     </div>
 
     <!-- 上传区域 -->
-    <div class="grid grid-cols-12 gap-8">
-      <div class="col-span-5">
+    <div class="space-y-5">
+      <div>
         <label class="block text-sm font-medium text-text2 mb-2">选择文件</label>
-        <label class="bg-white border-2 border-dashed border-border rounded-lg p-12 text-center hover:border-accent transition-colors cursor-pointer h-full flex flex-col items-center justify-center block">
-          <div class="text-5xl mb-4">📁</div>
-          <div class="text-sm text-text2 mb-2 font-medium">拖拽文件至此，或点击选择</div>
+        <label
+          class="bg-white border-2 border-dashed rounded-lg p-12 text-center transition-colors cursor-pointer min-h-[320px] flex flex-col items-center justify-center block"
+          :class="isDragging ? 'border-accent bg-accent/5' : 'border-border hover:border-accent'"
+          @dragover="handleDragOver"
+          @dragleave="handleDragLeave"
+          @drop="handleDrop"
+        >
+          <div class="text-5xl mb-4">{{ isDragging ? '📂' : '📁' }}</div>
+          <div class="text-sm text-text2 mb-2 font-medium">{{ isDragging ? '松开鼠标即可上传' : '拖拽文件至此，或点击选择' }}</div>
           <div class="text-xs text-muted mb-6">支持 PDF · DOCX · XLSX · TXT · MD</div>
           <div v-if="file" class="text-xs text-accent font-medium mb-4">
             已选择：{{ file.name }}
@@ -373,10 +409,7 @@ const handleBatchParse = async () => {
         </label>
       </div>
 
-      <div class="col-span-2"></div>
-
-      <div class="col-span-5 space-y-4">
-        <!-- 上传按钮 -->
+      <div class="bg-white border border-border rounded-lg p-5 space-y-4">
         <button
           @click="handleUpload"
           :disabled="loading || !file"
@@ -385,7 +418,6 @@ const handleBatchParse = async () => {
           {{ loading ? '处理中...' : '上传并解析' }}
         </button>
 
-        <!-- File ID -->
         <div v-if="fileId">
           <label class="block text-sm font-medium text-text2 mb-1">File ID</label>
           <div class="flex gap-2">
