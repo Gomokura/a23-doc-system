@@ -34,6 +34,9 @@ from .docx_operations import (
     word_extract_content,
     word_generate_summary,
     word_replace_text,
+    word_format_heading,
+    word_edit_heading,
+    word_delete_heading,
 )
 
 from .xlsx_operations import (
@@ -68,6 +71,9 @@ __all__ = [
     'word_extract_content',
     'word_generate_summary',
     'word_replace_text',
+    'word_format_heading',
+    'word_edit_heading',
+    'word_delete_heading',
     # Excel 操作
     'ExcelDocumentOperations',
     'excel_get_content',

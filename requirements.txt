@@ -32,7 +32,7 @@ sentence-transformers==3.0.0
 
 # Database
 sqlalchemy==2.0.30
-pydantic-settings==2.2.1
+pydantic-settings>=2.3.0
 
 # Frontend
 gradio==4.36.0
