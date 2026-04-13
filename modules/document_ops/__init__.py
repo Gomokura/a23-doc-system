@@ -5,11 +5,11 @@
 主要功能：
 1. 解析自然语言指令 → 操作类型 + 参数
 2. 执行文档操作（编辑、格式、内容提取等）
-3. 支持 Word 和 Excel 文档
+3. 支持 Word、Excel 和 PDF 文档
 
 使用示例：
     from modules.document_ops import execute_natural_command
-    
+
     # 执行自然语言命令
     result = execute_natural_command(
         file_path="test.docx",
@@ -48,6 +48,12 @@ from .xlsx_operations import (
     excel_batch_fill,
 )
 
+from .pdf_operations import (
+    PDFDocumentOperations,
+    pdf_extract_text,
+    pdf_extract_page,
+)
+
 from .common_operations import (
     OperationExecutor,
     FormatConverter,
@@ -81,6 +87,10 @@ __all__ = [
     'excel_add_row',
     'excel_extract_table',
     'excel_batch_fill',
+    # PDF 操作
+    'PDFDocumentOperations',
+    'pdf_extract_text',
+    'pdf_extract_page',
     # 通用操作
     'OperationExecutor',
     'FormatConverter',

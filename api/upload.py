@@ -432,7 +432,8 @@ def _extract_template_text(file_path: str, file_type: str) -> str:
         return "\n".join(parts)
 
     elif file_type == "xlsx":
-        # Excel 智能提取：只取前3行（通常含表头），字符数极少
+        # Excel 智能提取：取前10行用于 LLM 分析
+        # 处理合并单元格：只读主格的值，避免从属格值覆盖主格
         from openpyxl import load_workbook
         wb = load_workbook(file_path, data_only=True)
         parts = []
@@ -440,10 +441,16 @@ def _extract_template_text(file_path: str, file_type: str) -> str:
         for sheet in wb.worksheets:
             parts.append(f"[Sheet: {sheet.title}]")
             total += len(sheet.title) + 12
+            # 收集合并单元格主格集合
+            merged_master = set()
+            for rng in sheet.merged_cells.ranges:
+                merged_master.add((rng.min_row, rng.min_col))
             rows_taken = 0
             for row in sheet.iter_rows(values_only=True):
-                if rows_taken >= 3 or total >= MAX_CHARS:
+                if rows_taken >= 10 or total >= MAX_CHARS:
                     break
+                # values_only=True 时，从属格返回 None，但需要跳过
+                # 重新遍历单元格以检查合并单元格主格
                 row_vals = [str(c) if c is not None else "" for c in row]
                 row_text = " | ".join(v for v in row_vals if v)
                 if row_text:

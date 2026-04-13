@@ -23,6 +23,7 @@ from modules.document_ops import (
     OperationExecutor,
     WordDocumentOperations,
     ExcelDocumentOperations,
+    PDFDocumentOperations,
     FormatConverter,
     DocumentMerger,
     DocumentSplitter,
@@ -238,6 +239,12 @@ async def extract_content(body: ContentExtractRequest, db: Session = Depends(get
                 result = ops.get_all_content()
             finally:
                 ops.close()
+        elif record.file_type == "pdf":
+            ops = PDFDocumentOperations(record.file_path)
+            try:
+                result = ops.extract_text()
+            finally:
+                ops.close()
         else:
             raise AppError(400, "UNSUPPORTED_TYPE", f"不支持的文件类型: {record.file_type}")
         
@@ -266,16 +273,30 @@ async def summarize_document(file_id: str, max_length: int = 500,
         max_length: 摘要最大字符数（默认500）
     """
     record = _get_file_record(file_id, db)
-    
-    if record.file_type != "docx":
-        raise AppError(400, "UNSUPPORTED_TYPE", "目前仅支持 Word 文档的摘要生成")
-    
+
     try:
-        ops = WordDocumentOperations(record.file_path)
-        try:
-            result = ops.generate_summary(max_length)
-        finally:
-            ops.close()
+        if record.file_type == "docx":
+            ops = WordDocumentOperations(record.file_path)
+            try:
+                result = ops.generate_summary(max_length)
+            finally:
+                ops.close()
+        elif record.file_type == "pdf":
+            ops = PDFDocumentOperations(record.file_path)
+            try:
+                result = ops.extract_text()
+                if result.get('success'):
+                    full_text = result.get('text', '')
+                    summary = full_text[:max_length] if len(full_text) <= max_length else full_text[:max_length] + "..."
+                    result = {
+                        'success': True,
+                        'summary': summary,
+                        'source_chars': len(full_text)
+                    }
+            finally:
+                ops.close()
+        else:
+            raise AppError(400, "UNSUPPORTED_TYPE", "目前仅支持 Word 和 PDF 文档的摘要生成")
         
         return {
             "success": result.get("success", False),

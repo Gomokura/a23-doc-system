@@ -3,6 +3,7 @@
 支持：格式转换、文档合并、文档拆分等跨格式操作
 """
 import os
+import re
 import json
 import shutil
 from typing import Dict, List, Optional, Any
@@ -554,6 +555,212 @@ def _normalize_docx_params(op_type: str, params: Dict[str, Any]) -> Dict[str, An
     return normalized
 
 
+def _normalize_xlsx_params(op_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Excel 工作表操作的参数归一化层。
+
+    职责：
+    1. 单元格引用归一化：A1 / "第2行第3列" / "第3列第2行"
+    2. 行号/列号归一化：支持中文数字
+    3. 颜色名转十六进制
+    4. LLM 偶发字段名兼容（cell_ref → cell，row_num → position 等）
+    """
+    normalized = dict(params or {})
+
+    # ── 1. 单元格引用归一化 ────────────────────────────────────────────
+    # LLM 可能返回 cell_ref / cell_location / location / row_col 等
+    if not normalized.get('cell'):
+        for key in ('cell_ref', 'cell_location', 'location', 'row_col', '坐标'):
+            val = normalized.get(key)
+            if val is not None:
+                normalized['cell'] = str(val)
+                break
+
+    # ── 2. 行号/列号归一化 ──────────────────────────────────────────────
+    # LLM 可能返回 row / row_num / position / 行号 / 位置
+    _row_col_ops = (
+        OperationType.ADD_ROW, OperationType.DELETE_ROW,
+        OperationType.ADD_COLUMN, OperationType.DELETE_COLUMN,
+        OperationType.EDIT_CELL, OperationType.FORMAT_CELL,
+    )
+    if not normalized.get('position') and op_type in _row_col_ops:
+        for key in ('row', 'row_num', 'position', '行号', '列号', '位置'):
+            val = normalized.get(key)
+            if val is not None:
+                normalized['position'] = val
+                break
+
+    # 中文数字转换
+    cn_map = {'零': 0, '一': 1, '二': 2, '三': 3, '四': 4,
+               '五': 5, '六': 6, '七': 7, '八': 8, '九': 9,
+               '十': 10, '百': 100}
+
+    def cn_to_int(cn_str):
+        try:
+            return int(cn_str)
+        except ValueError:
+            result = 0
+            temp = 0
+            valid = False
+            for ch in str(cn_str):
+                if ch in cn_map:
+                    temp = temp * 10 + cn_map[ch] if temp else cn_map[ch]
+                    valid = True
+                elif ch == '十':
+                    temp = temp or 1
+                    result = result * 10 + temp * 10
+                    temp = 0
+                    valid = True
+                elif ch == '百':
+                    temp = temp or 1
+                    result = result * 10 + temp * 100
+                    temp = 0
+                    valid = True
+                elif ch.isdigit():
+                    temp = temp * 10 + int(ch)
+                    valid = True
+            return result + temp if valid else None
+
+    pos = normalized.get('position')
+    if pos is not None:
+        if isinstance(pos, str):
+            # 处理"第3行"、"第5列"这类表达
+            row_match = re.search(r'第([零一二三四五六七八九十百\d]+)[行个]', pos)
+            if row_match:
+                n = cn_to_int(row_match.group(1))
+                if n is not None:
+                    normalized['position'] = n
+        elif isinstance(pos, (int, float)):
+            normalized['position'] = int(pos)
+
+    # ── 3. 颜色归一化 ─────────────────────────────────────────────────
+    color_name_to_hex = {
+        '红色': 'FF0000', '蓝色': '0000FF', '绿色': '00FF00',
+        '黑色': '000000', '白色': 'FFFFFF', '黄色': 'FFFF00',
+        '红': 'FF0000', '蓝': '0000FF', '绿': '00FF00',
+        '黑': '000000', '白': 'FFFFFF', '黄': 'FFFF00',
+    }
+    color_val = normalized.get('color')
+    if color_val and isinstance(color_val, str):
+        if color_val in color_name_to_hex:
+            normalized['color'] = color_name_to_hex[color_val]
+        elif color_val.startswith('rgb'):
+            rgb_match = re.search(r'rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', color_val)
+            if rgb_match:
+                r, g, b = rgb_match.groups()
+                normalized['color'] = f'{int(r):02X}{int(g):02X}{int(b):02X}'
+
+    # ── 4. 值归一化 ────────────────────────────────────────────────────
+    # LLM 可能返回 content / text / new_value / 值 → value
+    if not normalized.get('value') or normalized.get('value') == 'test':
+        for key in ('content', 'text', 'new_value', 'newContent', '单元格值', '值'):
+            val = normalized.get(key)
+            if val is not None:
+                normalized['value'] = val
+                break
+
+    # ── 5. 表名归一化 ──────────────────────────────────────────────────
+    # LLM 可能返回 sheet / worksheet / table_name
+    if not normalized.get('sheet_name'):
+        for key in ('sheet', 'worksheet', 'table_name', '工作表'):
+            val = normalized.get(key)
+            if val is not None:
+                normalized['sheet_name'] = str(val)
+                break
+
+    return normalized
+
+
+def _normalize_pdf_params(op_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    PDF 文档操作的参数归一化层。
+
+    职责：
+    1. 页码归一化：支持中文数字、阿拉伯数字
+    2. 关键字参数统一
+    3. 范围参数处理
+    """
+    normalized = dict(params or {})
+
+    # ── 1. 页码归一化 ─────────────────────────────────────────────────
+    # 支持 page_num / page / 页码
+    if not normalized.get('page_num') and not normalized.get('page_start'):
+        for key in ('page_num', 'page', '页码', 'page_number'):
+            val = normalized.get(key)
+            if val is not None:
+                normalized['page_num'] = val
+                break
+
+    # 中文数字转换
+    cn_map = {'零': 0, '一': 1, '二': 2, '三': 3, '四': 4,
+               '五': 5, '六': 6, '七': 7, '八': 8, '九': 9,
+               '十': 10, '百': 100}
+
+    def cn_to_int(cn_str):
+        try:
+            return int(cn_str)
+        except ValueError:
+            pass
+        result = 0
+        temp = 0
+        valid = False
+        for ch in str(cn_str):
+            if ch in cn_map:
+                temp = temp * 10 + cn_map[ch] if temp else cn_map[ch]
+                valid = True
+            elif ch == '十':
+                temp = temp or 1
+                result = result * 10 + temp * 10
+                temp = 0
+                valid = True
+            elif ch == '百':
+                temp = temp or 1
+                result = result * 10 + temp * 100
+                temp = 0
+                valid = True
+            elif ch.isdigit():
+                temp = temp * 10 + int(ch)
+                valid = True
+        result += temp
+        return result if valid else None
+
+    # 处理 page_num
+    page_num = normalized.get('page_num')
+    if page_num is not None:
+        if isinstance(page_num, str):
+            match = re.search(r'第([零一二三四五六七八九十百\d]+)[页]', page_num)
+            if match:
+                n = cn_to_int(match.group(1))
+                if n is not None:
+                    normalized['page_num'] = n
+            elif page_num.isdigit():
+                normalized['page_num'] = int(page_num)
+        elif isinstance(page_num, (int, float)):
+            normalized['page_num'] = int(page_num)
+
+    # 处理 page_start / page_end
+    for key in ('page_start', 'page_end'):
+        val = normalized.get(key)
+        if val is not None and isinstance(val, str):
+            match = re.search(r'第([零一二三四五六七八九十百\d]+)[页]', val)
+            if match:
+                n = cn_to_int(match.group(1))
+                if n is not None:
+                    normalized[key] = n
+            elif val.isdigit():
+                normalized[key] = int(val)
+
+    # ── 2. 关键字归一化 ────────────────────────────────────────────────
+    if not normalized.get('keyword'):
+        for k in ('keyword', '关键词', 'search_term', 'search_key'):
+            val = normalized.get(k)
+            if val:
+                normalized['keyword'] = val
+                break
+
+    return normalized
+
+
 class OperationExecutor:
     """
     操作执行器
@@ -571,6 +778,9 @@ class OperationExecutor:
         elif self.file_type in ('xlsx', 'xls'):
             from .xlsx_operations import ExcelDocumentOperations
             self.ops = ExcelDocumentOperations(file_path)
+        elif self.file_type == 'pdf':
+            from .pdf_operations import PDFDocumentOperations
+            self.ops = PDFDocumentOperations(file_path)
         else:
             self.ops = None
 
@@ -600,7 +810,11 @@ class OperationExecutor:
         elif self.file_type in ('xlsx', 'xls'):
             return self._execute_xlsx_operation(op_type, params)
 
-        return {'success': False, 'message': '未实现该文件类型的操作'}
+        # ── PDF 文档操作 ──────────────────────────────────────────────
+        elif self.file_type == 'pdf':
+            return self._execute_pdf_operation(op_type, params)
+
+        return {'success': False, 'message': f'未实现操作: {op_type}'}
 
     def _resolve_position(self, position_str: Optional[str], content_type: str = "paragraph") -> Optional[str]:
         """
@@ -820,6 +1034,8 @@ class OperationExecutor:
 
     def _execute_xlsx_operation(self, op_type: str, params: Dict) -> Dict[str, Any]:
         """执行 Excel 文档操作"""
+        params = _normalize_xlsx_params(op_type, params)
+        logger.debug(f"[执行器] _execute_xlsx_operation 归一化后 params: {params}")
 
         if op_type == OperationType.EDIT_CELL:
             return self.ops.edit_cell(
@@ -871,6 +1087,61 @@ class OperationExecutor:
 
         return {'success': False, 'message': f'未实现操作: {op_type}'}
 
+    def _execute_pdf_operation(self, op_type: str, params: Dict) -> Dict[str, Any]:
+        """执行 PDF 文档操作"""
+        params = _normalize_pdf_params(op_type, params)
+        logger.debug(f"[执行器] _execute_pdf_operation 归一化后 params: {params}")
+
+        if op_type == OperationType.EXTRACT_CONTENT:
+            return self.ops.extract_text(
+                page_start=params.get('page_start'),
+                page_end=params.get('page_end')
+            )
+
+        elif op_type == OperationType.GENERATE_SUMMARY:
+            # 获取全部文本用于生成摘要
+            text_result = self.ops.extract_text()
+            if not text_result.get('success'):
+                return text_result
+
+            full_text = text_result.get('text', '')
+            max_length = params.get('max_length', 500)
+
+            # 简单摘要：取前 max_length 字符
+            if len(full_text) <= max_length:
+                summary = full_text
+            else:
+                # 尝试在句号处截断
+                summary = full_text[:max_length]
+                last_period = summary.rfind('。')
+                if last_period > max_length * 0.5:
+                    summary = summary[:last_period + 1]
+                else:
+                    summary = summary[:max_length] + "..."
+
+            return {
+                'success': True,
+                'summary': summary,
+                'source_chars': len(full_text),
+                'max_length': max_length
+            }
+
+        elif op_type == "extract_page":
+            return self.ops.extract_page(
+                page_num=params.get('page_num', 1)
+            )
+
+        elif op_type == "extract_by_keyword":
+            return self.ops.extract_by_keyword(
+                keyword=params.get('keyword', ''),
+                context_chars=params.get('context_chars', 200)
+            )
+
+        elif op_type == "get_outline":
+            return self.ops.get_outline()
+
+        return {'success': False, 'message': f'未实现操作: {op_type}'}
+
     def close(self):
         """关闭操作对象"""
         if self.ops and hasattr(self.ops, 'close'):
@@ -893,7 +1164,14 @@ def execute_natural_command(file_path: str, instruction: str) -> Dict[str, Any]:
     """
     # 确定文件类型
     ext = os.path.splitext(file_path)[1].lower()
-    file_type = 'docx' if ext == '.docx' else ('xlsx' if ext in ('.xlsx', '.xls') else 'unknown')
+    if ext == '.docx':
+        file_type = 'docx'
+    elif ext in ('.xlsx', '.xls'):
+        file_type = 'xlsx'
+    elif ext == '.pdf':
+        file_type = 'pdf'
+    else:
+        file_type = 'unknown'
 
     if file_type == 'unknown':
         return {'success': False, 'message': f'不支持的文件类型: {ext}'}

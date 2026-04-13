@@ -48,9 +48,33 @@ def extract_template_fields(template_path: str) -> dict:
                 for cell in row:
                     if cell.value and isinstance(cell.value, str):
                         found.update(placeholder_pattern.findall(cell.value))
+        # xlsx 模板：直接用 openpyxl 读取表头列名（绕过 LLM 识别）
+        if not found:
+            from openpyxl.cell.cell import MergedCell
+            for sheet in wb.worksheets:
+                for row in sheet.iter_rows():
+                    row_vals = []
+                    for cell in row:
+                        if isinstance(cell, MergedCell):
+                            continue
+                        v = cell.value
+                        if v is None:
+                            continue
+                        v_str = str(v).strip().strip("'").strip()
+                        if not v_str:
+                            continue
+                        row_vals.append(v_str)
+                    if row_vals:
+                        found.update(row_vals)
+                        break
+                if found:
+                    break
 
     if found:
         logger.info(f"占位符检测：发现 {len(found)} 个占位符字段: {found}")
+        # xlsx 表格模板用智能追加模式（不是单值占位符替换）
+        if ext == '.xlsx':
+            return {"fields": list(found), "method": "llm"}
         return {"fields": list(found), "method": "placeholder"}
 
     # ── 无占位符：用 LLM 分析模板表头 ─────────────────────────
@@ -60,9 +84,10 @@ def extract_template_fields(template_path: str) -> dict:
         return {"fields": [], "method": "llm"}
 
     client = OpenAI(
-        api_key=settings.llm_api_key, 
+        api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
-        default_headers=settings.openai_default_headers
+        default_headers=settings.openai_default_headers,
+        timeout=120,
     )
     prompt = f"""以下是一个待填写的表格/文档模板内容。请识别出其中所有需要填写数据的字段名称。
 字段可能是表格列标题、表单标签、空白行前的描述文字等。
@@ -116,8 +141,8 @@ def _read_template_text(template_path: str, ext: str) -> str:
             lines = []
             for sheet in wb.worksheets:
                 for row in sheet.iter_rows():
-                    row_texts = [str(cell.value).strip() for cell in row
-                                 if cell.value is not None and str(cell.value).strip()]
+                    row_texts = [str(cell.value).strip().strip("'\"") for cell in row
+                                 if cell.value is not None and str(cell.value).strip().strip("'\"")]
                     if row_texts:
                         lines.append(" | ".join(row_texts))
             return "\n".join(lines)
@@ -161,15 +186,25 @@ def _read_source_texts(source_file_paths: list) -> str:
             elif ext == '.xlsx':
                 import pandas as pd
                 import warnings
+                import io
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     xls = pd.ExcelFile(path)
                     sheet_texts = []
                     for sheet_name in xls.sheet_names:
-                        df = pd.read_excel(xls, sheet_name=sheet_name).fillna("")
-                        # 保留完整表格，to_csv 比 to_string 更紧凑，节省 token
-                        sheet_texts.append(f"[Sheet: {sheet_name}]\n" + df.to_csv(index=False))
+                        df = pd.read_excel(xls, sheet_name=sheet_name)
+                        df = df.fillna("")
+                        # 保留列标题行（CSV 第一行），确保 LLM 能识别每列含义
+                        # 格式：每行 "列名1: 值1, 列名2: 值2, ..."
+                        csv_buffer = io.StringIO()
+                        df.to_csv(csv_buffer, index=False, encoding='utf-8')
+                        csv_content = csv_buffer.getvalue().strip()
+                        sheet_texts.append(f"[Sheet: {sheet_name}]\n{csv_content}")
+                    # 拼接所有 sheet，限制总字符数避免 token 爆炸
                     text = "\n\n".join(sheet_texts)
+                    MAX_SOURCE = 15000
+                    if len(text) > MAX_SOURCE:
+                        text = text[:MAX_SOURCE] + "\n...[内容过长已截断]..."
 
             elif ext == '.pdf':
                 try:
@@ -197,47 +232,136 @@ def _read_source_texts(source_file_paths: list) -> str:
 # 核心：LLM 提取字段值（返回列表，支持多行）
 # ────────────────────────────────────────────────────────────
 
-def _extract_values_by_llm(fields: list, source_text: str, max_rows: int = 5) -> list:
+def _extract_values_by_llm(template_fields: list, source_file_paths: list, source_text: str, max_rows: int = 5) -> list:
     """
-    让 LLM 从源文档文本中提取各字段的值。
-    每个字段的值统一用 JSON 数组返回，天然支持多行数据。
+    从数据源中提取各字段的值，混合策略：
+    - xlsx 文件：直接用 pandas 按列名读取（最可靠）
+    - 其他文件：用 LLM 从文本中提取（兜底）
 
     返回格式:
         [{"field_name": "字段名", "values": ["值1", "值2", ...]}, ...]
     """
-    if not fields or not source_text.strip():
+    if not template_fields:
         return []
 
+    answers = []
+
+    # ── xlsx 文件：直接 pandas 读取 ─────────────────────────────────────────
+    xlsx_sources = [p for p in source_file_paths if os.path.splitext(p)[1].lower() == '.xlsx']
+    if xlsx_sources:
+        import warnings
+        import pandas as pd
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+
+        for xlsx_path in xlsx_sources:
+            try:
+                xls = pd.ExcelFile(xlsx_path)
+                for sheet_name in xls.sheet_names:
+                    df = pd.read_excel(xls, sheet_name=sheet_name)
+                    df = df.fillna("")
+
+                    # 清理列名（去除空格和单引号）
+                    df.columns = [str(c).strip().strip("'\"").strip() for c in df.columns]
+
+                    # 精确匹配：只接受列名完全相同的字段（忽略大小写、空格差异）
+                    for col_name in df.columns:
+                        col_clean = col_name.lower().replace(" ", "").replace("_", "").replace("/", "").replace("\\", "")
+                        matched = None
+                        for tf in template_fields:
+                            tf_clean = tf.lower().replace(" ", "").replace("_", "").replace("/", "").replace("\\", "")
+                            if col_clean == tf_clean:
+                                matched = tf
+                                break
+                        if not matched:
+                            continue
+                        field_name = matched
+                        col_data = df[col_name].astype(str).tolist()
+                        col_data = [v for v in col_data if v not in ("", "nan", "NaN")]
+                        if not col_data:
+                            continue
+                        # 合并到已有答案
+                        existing = next((a for a in answers if a["field_name"] == field_name), None)
+                        if existing:
+                            existing["values"].extend(col_data[:max_rows])
+                        else:
+                            answers.append({"field_name": field_name, "values": col_data[:max_rows]})
+            except Exception as e:
+                logger.warning(f"pandas 读取 xlsx 失败 {os.path.basename(xlsx_path)}: {e}")
+
+    # ── 非 xlsx 文件：用 LLM 提取 ─────────────────────────────────────────
+    non_xlsx = [p for p in source_file_paths if os.path.splitext(p)[1].lower() != '.xlsx']
+    if non_xlsx and source_text.strip():
+        llm_answers = _extract_by_llm_from_text(template_fields, source_text, max_rows)
+        for la in llm_answers:
+            existing = next((a for a in answers if a["field_name"] == la["field_name"]), None)
+            if existing:
+                existing["values"].extend(la["values"])
+            else:
+                answers.append(la)
+
+    # 过滤掉"未找到"类占位符，限制每字段最多 max_rows 个值（取前几行，保持行对齐）
+    for a in answers:
+        a["values"] = [v for v in a["values"] if v not in ("(未找到)", "(提取失败)", "")][:max_rows]
+
+    logger.info(f"字段提取完成，共 {len(answers)} 个字段有值: " + str([(a["field_name"], len(a["values"])) for a in answers]))
+    return answers
+
+
+def _best_match_col(field: str, col_names: list) -> str | None:
+    """
+    在 col_names 中找到与 field 最匹配的列名（模糊匹配）。
+    """
+    field_clean = field.lower().replace(" ", "").replace("_", "").replace("/", "").replace("\\", "")
+    best_score = 0
+    best_col = None
+    for col in col_names:
+        col_clean = col.lower().replace(" ", "").replace("_", "").replace("/", "").replace("\\", "")
+        if col_clean == field_clean:
+            return col
+        # 计算相似度：共同字符越多分数越高
+        common = sum(1 for c in field_clean if c in col_clean)
+        score = common / max(len(field_clean), 1)
+        if score > best_score and score > 0.5:
+            best_score = score
+            best_col = col
+    return best_col
+
+
+def _extract_by_llm_from_text(template_fields: list, source_text: str, max_rows: int) -> list:
+    """
+    让 LLM 从非结构化文本中，根据模板表头字段名提取对应值。
+    """
     client = OpenAI(
-        api_key=settings.llm_api_key, 
+        api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
-        default_headers=settings.openai_default_headers
+        default_headers=settings.openai_default_headers,
+        timeout=120,
     )
 
     MAX_SOURCE = 12000
     if len(source_text) > MAX_SOURCE:
-        logger.warning(f"源文本过长({len(source_text)})，截取前 {MAX_SOURCE} 字符")
         source_text = source_text[:MAX_SOURCE] + "\n...[内容过长已截断]..."
 
-    fields_str = "\n".join(f"- {f}" for f in fields)
+    fields_str = "\n".join(f"- {f}" for f in template_fields)
 
-    prompt = f"""你是一个精准的信息提取助手。请从以下数据源文档中，提取每个字段对应的所有值。
+    prompt = f"""你是一个表格数据提取助手。已知数据源文档内容，你需要根据【模板表头列名】在数据源中找到对应的值并返回。
 
-字段列表：
+模板表头列名（必须严格按这些名称返回答案）：
 {fields_str}
 
 提取规则：
-1. 严格基于文档内容提取，不要编造数据
-2. 每个字段的值必须用 JSON 数组表示，即使只有一个值也用数组
-3. 如果字段对应表格中的一列，提取该列所有行的值（最多 {max_rows} 行），每行一个元素
-4. 如果字段在文档中找不到，返回空数组 []
-5. 数组元素只包含纯值，不要加字段名前缀、编号或说明
+1. 严格按照模板表头列名在数据源中查找对应值，不要编造数据
+2. 每个列名对应一个 values 数组，即使只有一个值也用数组
+3. 如果数据源中某列有多个行的值，取前 {max_rows} 行，每行一个元素
+4. 如果某列在数据源中找不到，返回空数组 []
+5. values 数组中只包含纯值，不要加前缀、编号或说明文字
 
 严格返回如下 JSON 格式（不要有其他文字）：
 {{
   "answers": [
-    {{"field_name": "字段名1", "values": ["值1", "值2", "值3"]}},
-    {{"field_name": "字段名2", "values": ["值A", "值B"]}}
+    {{"field_name": "列名1", "values": ["值1", "值2", "值3"]}},
+    {{"field_name": "列名2", "values": ["值A", "值B"]}}
   ]
 }}
 
@@ -255,10 +379,11 @@ def _extract_values_by_llm(fields: list, source_text: str, max_rows: int = 5) ->
             max_tokens=4000,
         )
         raw = resp.choices[0].message.content
+        logger.info(f"LLM 原始返回: {raw[:500]}")
         result = json.loads(raw)
         answers = result.get("answers", [])
 
-        # 兼容旧格式（value 字符串），统一转成 values 列表
+        # 兼容旧格式，统一转成 values 列表
         normalized = []
         for a in answers:
             field_name = a.get("field_name", "")
@@ -267,25 +392,21 @@ def _extract_values_by_llm(fields: list, source_text: str, max_rows: int = 5) ->
                 if not isinstance(vals, list):
                     vals = [str(vals)]
             elif "value" in a:
-                # 旧格式：尝试按换行拆分
                 raw_val = str(a["value"])
                 vals = [v.strip() for v in raw_val.split("\n") if v.strip()]
                 if not vals:
                     vals = [raw_val]
             else:
                 vals = []
-            # 过滤掉"未找到"类占位符
             vals = [v for v in vals if v not in ("(未找到)", "(提取失败)", "")]
             normalized.append({"field_name": field_name, "values": vals})
 
         logger.info(f"LLM 提取完成，共 {len(normalized)} 个字段")
-        for a in normalized[:5]:
-            logger.info(f"  {a['field_name']}: {len(a['values'])} 行 → {a['values'][:3]}")
         return normalized
 
     except Exception as e:
         logger.error(f"LLM 提取字段值失败: {e}")
-        return [{"field_name": f, "values": []} for f in fields]
+        return []
 
 
 # ────────────────────────────────────────────────────────────
@@ -323,38 +444,63 @@ def _write_to_template(template_path: str, answers: list, output_path: str, meth
 def _write_xlsx_smart(template_path: str, answers: list, output_path: str) -> bool:
     """
     智能填写 Excel：
-    - 找到表头行，按表头列名模糊匹配字段
-    - 每个字段的 values 列表逐行写入表头行下方
+    - 遍历所有工作表，找到最佳表头行（非空单元格最多的行）
+    - 处理合并单元格：只读主格，避免从属格值覆盖
+    - 按表头列名模糊匹配字段，逐行写入数据
     """
     from openpyxl import load_workbook
     try:
         wb = load_workbook(template_path)
-        ws = wb.active
 
         # field_name -> [值列表]
         field_map = {a["field_name"]: a["values"] for a in answers}
 
-        # ── 找表头行：第一个有内容的行 ──────────────────────────
-        header_row_idx = None
-        header_cells = {}  # col_idx -> 字段名
-        for row_idx, row in enumerate(ws.iter_rows(), start=1):
-            non_empty = [(cell.column, str(cell.value).strip()) for cell in row
-                         if cell.value and str(cell.value).strip()]
-            if non_empty:
-                header_row_idx = row_idx
-                for col_idx, col_name in non_empty:
-                    header_cells[col_idx] = col_name
-                break
+        # ── 遍历所有工作表，找到最佳表头行 ─────────────────────────
+        best_ws = None
+        best_header_row = None
+        best_header_cells = {}  # col_idx -> 字段名
+        best_score = 0
 
-        # 没有表头：直接追加 field + value
-        if header_row_idx is None:
+        for ws in wb.worksheets:
+            # 收集合并单元格主格集合（只读主格的值）
+            merged_master = set()
+            for rng in ws.merged_cells.ranges:
+                merged_master.add((rng.min_row, rng.min_col))
+
+            # 遍历所有行，找非空单元格最多的行
+            for row_idx, row in enumerate(ws.iter_rows(), start=1):
+                cells_this_row = []
+                for cell in row:
+                    if cell.value is None:
+                        continue
+                    val = str(cell.value).strip().strip("'")
+                    if not val:
+                        continue
+                    # 无合并单元格时，所有单元格都有效；有合并单元格时，只取主格
+                    if merged_master and (cell.row, cell.column) not in merged_master:
+                        continue
+                    cells_this_row.append((cell.column, val))
+
+                # 评分：优先选择非空单元格数最多的行
+                # 同时排除只有1-2个单元格的行（可能是标题行而非表头）
+                if len(cells_this_row) >= 3 and len(cells_this_row) > best_score:
+                    best_score = len(cells_this_row)
+                    best_ws = ws
+                    best_header_row = row_idx
+                    best_header_cells = {col: name for col, name in cells_this_row}
+
+        # 没有找到表头行
+        if best_ws is None or best_header_row is None:
+            logger.warning("模板中未找到有效表头行，直接追加数据")
             for a in answers:
                 for val in a["values"]:
-                    ws.append([a["field_name"], val])
+                    wb.active.append([a["field_name"], val])
             wb.save(output_path)
             return True
 
-        # ── 计算最多需要写几行 ────────────────────────────────
+        logger.info(f"找到表头行: 第{best_header_row}行，列数: {len(best_header_cells)}, 工作表: {best_ws.title}")
+
+        # ── 计算最多需要写几行 ───────────────────────────────────
         max_data_rows = max(
             (len(vals) for vals in field_map.values() if vals),
             default=1
@@ -365,18 +511,44 @@ def _write_xlsx_smart(template_path: str, answers: list, output_path: str) -> bo
             shutil.copy(template_path, output_path)
             return True
 
-        start_row = header_row_idx + 1
+        start_row = best_header_row + 1
 
-        # ── 逐行写入 ──────────────────────────────────────────
+        # ── 逐行写入，处理合并单元格 ──────────────────────────────
+        # 收集所有合并区域（行范围），避免写入时触发 openpyxl 冲突
+        merged_row_ranges = set()
+        for rng in best_ws.merged_cells.ranges:
+            if rng.min_row >= best_header_row:
+                merged_row_ranges.add((rng.min_row, rng.max_row))
+
+        written_cells = set()  # 已写入的 (row, col)
+
+        logger.info(f"字段映射: {field_map}")
+
         for data_row_offset in range(max_data_rows):
             write_row = start_row + data_row_offset
-            for col_idx, col_name in header_cells.items():
+
+            # 跳过已合并的行（表头本身可能跨行）
+            skip_this_row = False
+            for min_r, max_r in merged_row_ranges:
+                if min_r <= write_row <= max_r and write_row != min_r:
+                    skip_this_row = True
+                    break
+            if skip_this_row:
+                continue
+
+            for col_idx, col_name in best_header_cells.items():
+                # 避免重复写入同一单元格
+                if (write_row, col_idx) in written_cells:
+                    continue
+
                 matched_value = _fuzzy_match_field(col_name, field_map, data_row_offset)
                 if matched_value is not None:
-                    ws.cell(row=write_row, column=col_idx, value=matched_value)
+                    best_ws.cell(row=write_row, column=col_idx, value=matched_value)
+                    written_cells.add((write_row, col_idx))
 
         wb.save(output_path)
-        logger.info(f"XLSX 智能填写完成: {output_path}，共写入 {max_data_rows} 行数据")
+        logger.info(f"XLSX 智能填写完成: {output_path}，工作表={best_ws.title}，"
+                    f"表头行={best_header_row}，共写入 {max_data_rows} 行数据")
         return True
 
     except Exception as e:
@@ -447,19 +619,69 @@ def _write_docx_smart(template_path: str, answers: list, output_path: str) -> bo
 
 def _fuzzy_match_field(col_name: str, field_map: dict, row_idx: int):
     """
-    模糊匹配字段名（忽略大小写、空格、下划线），返回对应行的值。
-    field_map: {field_name: [值列表]}
+    模糊匹配字段名（忽略大小写、空格、下划线、斜杠），返回对应行的值。
+
+    匹配策略（按优先级）：
+    1. 精确匹配（忽略空格后相等）
+    2. 包含匹配（清理后列名被字段名包含，或字段名被列名包含）
+    3. 子串匹配（任一方包含另一方）
+
+    行索引处理：
+    - row_idx < len(values): 返回对应行
+    - row_idx >= len(values): 返回最后一个值（重复填充）
+    - values 为空或 row_idx < 0: 返回 None
     """
     col_lower = col_name.lower().replace(" ", "").replace("_", "").replace("/", "").replace("\\", "")
+    candidates = []
+
     for field_name, values in field_map.items():
         if not values:
             continue
         field_lower = field_name.lower().replace(" ", "").replace("_", "").replace("/", "").replace("\\", "")
-        if col_lower == field_lower or col_lower in field_lower or field_lower in col_lower:
-            if row_idx < len(values):
-                return values[row_idx]
-            # 超出范围时不重复最后一个值（避免数据错位）
-    return None
+
+        score = 0
+        # 精确匹配（最高优先级）
+        if col_lower == field_lower:
+            score = 3
+        # 清理后相等（忽略所有空白字符）
+        elif col_lower == field_lower:
+            score = 3
+        # 列名包含字段名（列标题更具体）
+        elif field_lower and col_lower in field_lower:
+            score = 2
+        # 字段名包含列名（字段定义更具体）
+        elif col_lower and field_lower in col_lower:
+            score = 2
+        # 子串匹配（任一方在另一方中）
+        elif field_lower and col_lower in field_lower:
+            score = 1
+        else:
+            continue
+
+        # 取对应行，如果超出范围则取最后一行（重复填充）
+        if row_idx < len(values):
+            val = values[row_idx]
+        else:
+            val = values[-1]  # 超出范围时重复最后一行
+
+        candidates.append((score, field_name, val))
+
+    if not candidates:
+        return None
+
+    # 按优先级排序（分数高的在前），返回最佳匹配
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best = candidates[0]
+
+    # 如果有多个候选且分数不同，选最优
+    if len(candidates) > 1 and candidates[0][0] > candidates[1][0]:
+        return best[2]
+    # 如果分数相同但字段不同，返回精确匹配的那个（如果有）
+    exact = next((c for c in candidates if c[0] == 3), None)
+    if exact:
+        return exact[2]
+    # 否则返回分数最高的第一个
+    return best[2]
 
 
 # ────────────────────────────────────────────────────────────
@@ -507,12 +729,12 @@ def extract_and_fill(
 
         # Step 2: 读取所有数据源
         source_text = _read_source_texts(source_file_paths)
-        if not source_text.strip():
+        if not source_text.strip() and not any(os.path.splitext(p)[1].lower() == '.xlsx' for p in source_file_paths):
             logger.error("数据源文件读取失败或内容为空")
             return False
 
-        # Step 3: LLM 提取字段值（返回列表格式）
-        answers = _extract_values_by_llm(fields, source_text, max_rows=max_rows)
+        # Step 3: 提取字段值（xlsx 直接 pandas 读取，其他文件用 LLM）
+        answers = _extract_values_by_llm(fields, source_file_paths, source_text, max_rows=max_rows)
         if not answers:
             logger.error("字段值提取失败，answers 为空")
             return False

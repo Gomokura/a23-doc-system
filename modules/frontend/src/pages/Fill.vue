@@ -301,9 +301,14 @@ async function handleSmartFill() {
     step.value = 'done'
     progress.value.done = true
     ElMessage.success('智能回填成功！可下载文档')
-  } catch (e: any) {
+    } catch (e: any) {
     errorMsg.value = e.message
-    ElMessage.error('回填失败：' + e.message)
+    // 409: 数据源文件未索引，提示更友好
+    if (res.status === 409) {
+      ElMessage.error('回填失败：部分数据源文档尚未完成解析，请先在「上传」页面解析文档后再试')
+    } else {
+      ElMessage.error('回填失败：' + e.message)
+    }
   } finally {
     loading.value = false
   }

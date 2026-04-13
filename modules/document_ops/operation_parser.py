@@ -43,6 +43,8 @@ class OperationType:
     CONVERT_FORMAT = "convert_format"           # 格式转换
     MERGE_DOCUMENTS = "merge_documents"         # 合并文档
     SPLIT_DOCUMENT = "split_document"          # 拆分文档
+    EXTRACT_CONTENT = "extract_content"         # 提取内容（通用）
+    GENERATE_SUMMARY = "generate_summary"       # 生成摘要（通用）
     UNKNOWN = "unknown"                         # 未知操作
 
 
@@ -129,6 +131,15 @@ OPERATION_PATTERNS = {
         r"转换.*格式", r"将.*转为", r"导出.*为",
         r"另存为.*格式"
     ],
+    # PDF 操作
+    OperationType.EXTRACT_CONTENT: [
+        r"提取.*内容", r"提取.*文本", r"读取.*内容",
+        r"获取.*全文", r"导出.*文本"
+    ],
+    OperationType.GENERATE_SUMMARY: [
+        r"生成.*摘要", r"总结.*内容", r"概括.*要点",
+        r"提炼.*主题", r"写.*摘要", r"生成.*总结"
+    ],
 }
 
 
@@ -158,7 +169,7 @@ class OperationParser:
 
         Args:
             instruction: 自然语言指令
-            file_type: 文件类型 (docx/xlsx/txt)
+            file_type: 文件类型 (docx/xlsx/pdf)
             file_path: 文档路径（可选）。若提供，LLM 解析时会带上文档段落列表，
                        避免瞎猜 position 导致越界问题。
         """
@@ -169,6 +180,12 @@ class OperationParser:
         if file_path and file_type == "docx":
             document_context = self._read_docx_context(file_path)
             logger.debug(f"[操作解析] 文档段落上下文: {document_context}")
+        elif file_path and file_type in ("xlsx", "xls"):
+            document_context = self._read_xlsx_context(file_path)
+            logger.debug(f"[操作解析] Excel 工作表上下文: {document_context}")
+        elif file_path and file_type == "pdf":
+            document_context = self._read_pdf_context(file_path)
+            logger.debug(f"[操作解析] PDF 文档上下文: {document_context}")
 
         # 2. 规则快速匹配
         matched_type, rule_confidence = self._rule_based_match(instruction, file_type)
@@ -303,6 +320,91 @@ class OperationParser:
             }
         except Exception as e:
             logger.warning(f"[操作解析] 读取文档上下文失败: {e}")
+            return None
+
+    def _read_xlsx_context(self, file_path: str) -> Optional[Dict]:
+        """
+        读取 Excel 工作表上下文，供 LLM 解析时参考。
+        """
+        try:
+            import os
+            if not os.path.exists(file_path):
+                return None
+
+            from openpyxl import load_workbook
+            wb = load_workbook(file_path, read_only=True, data_only=True)
+            sheets_info = []
+
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                rows_count = ws.max_row or 0
+                cols_count = ws.max_column or 0
+
+                # 读取表头（前5行用于预览）
+                headers = []
+                for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=min(5, rows_count), values_only=True), 1):
+                    row_vals = [str(c) if c is not None else "" for c in row]
+                    if any(row_vals):
+                        headers.append(f"第{row_idx}行: {' | '.join(row_vals[:10])}" +
+                                      ("..." if len(row_vals) > 10 else ""))
+                    if row_idx == 1:
+                        break
+
+                sheets_info.append({
+                    'name': sheet_name,
+                    'rows': rows_count,
+                    'cols': cols_count,
+                    'preview': headers[:3]
+                })
+
+            wb.close()
+
+            total_sheets = len(sheets_info)
+            note = (
+                f"Excel 共有 {total_sheets} 个工作表。"
+                f"单元格引用格式如 A1（第1行A列）、B2（第2行B列）。"
+                f"工作表名用 sheet_name 参数指定。"
+            )
+
+            return {
+                'sheets': sheets_info,
+                'total_sheets': total_sheets,
+                'note': note
+            }
+        except Exception as e:
+            logger.warning(f"[操作解析] 读取 Excel 上下文失败: {e}")
+            return None
+
+    def _read_pdf_context(self, file_path: str) -> Optional[Dict]:
+        """
+        读取 PDF 文档上下文，供 LLM 解析时参考。
+        """
+        try:
+            import os
+            if not os.path.exists(file_path):
+                return None
+
+            import fitz
+            doc = fitz.open(file_path)
+            total_pages = len(doc)
+
+            # 读取前5页的文本预览
+            preview_pages = []
+            for i in range(min(5, total_pages)):
+                page = doc[i]
+                text = page.get_text("text").strip()
+                if text:
+                    preview = text[:200].replace('\n', ' ')
+                    preview_pages.append(f"第{i+1}页: 「{preview}...」")
+            doc.close()
+
+            return {
+                'total_pages': total_pages,
+                'preview': preview_pages,
+                'note': f"PDF 共有 {total_pages} 页。页码参数从1开始。"
+            }
+        except Exception as e:
+            logger.warning(f"[操作解析] 读取 PDF 上下文失败: {e}")
             return None
 
     def _rule_based_match(self, instruction: str, file_type: str) -> tuple:
@@ -505,86 +607,166 @@ class OperationParser:
         LLM 辅助解析
 
         Args:
-            document_context: 文档段落上下文。若提供，LLM 会知道文档有多少段、
-                            每段大概是什么内容，避免瞎猜 position。
-
+            file_type: 文件类型 (docx/xlsx/pdf)
+            document_context: 文档上下文。若提供，LLM 会知道文档结构，
+                           避免瞎猜 position。
         Returns:
             (operation_type, confidence, parameters, reasoning)
         """
-        # 构建文档上下文描述
+        # ── 1. 构建文档上下文描述 ─────────────────────────────────────────
         ctx_block = ""
         if document_context:
-            ctx_block = f"""
+            if file_type == "docx":
+                ctx_block = f"""
 ## 文档当前状态（重要！请参考）
-
-文档正文段落和标题分开统计：
-- 正文段落：{document_context['total_body_paragraphs']} 个，"第N段"中的N指这些段落（从1开始）
-- 标题：{document_context['total_headings']} 个，"第N个标题" / "包含X的标题"指这些
+- 正文段落：{document_context.get('total_body_paragraphs', 0)} 个，"第N段"中的N指这些段落（从1开始）
+- 标题：{document_context.get('total_headings', 0)} 个，"第N个标题" / "包含X的标题"指这些
 
 正文段落列表：
 """
-            for p in document_context.get('body_paragraphs', []):
-                ctx_block += f"  第{p['index']}段 [{p['style']}]: 「{p['text']}」\n"
-            if document_context.get('headings'):
-                ctx_block += "\n标题列表：\n"
-                for i, h in enumerate(document_context['headings'], 1):
-                    ctx_block += f"  第{i}个标题 [{h['style']}]: 「{h['text']}」\n"
-            ctx_block += """
+                for p in document_context.get('body_paragraphs', []):
+                    ctx_block += f"  第{p['index']}段 [{p['style']}]: 「{p['text']}」\n"
+                if document_context.get('headings'):
+                    ctx_block += "\n标题列表：\n"
+                    for i, h in enumerate(document_context['headings'], 1):
+                        ctx_block += f"  第{i}个标题 [{h['style']}]: 「{h['text']}」\n"
+                ctx_block += """
 重要：
 - "第3段"指正文段落编号（不含标题）
 - "第1个标题" / "包含'关键词'的标题"指标题
 - position 不要超出文档实际数量
 """
+
+            elif file_type in ("xlsx", "xls"):
+                ctx_block = """
+## Excel 工作表当前状态（重要！请参考）
+"""
+                for sheet in document_context.get('sheets', []):
+                    ctx_block += f"- 工作表「{sheet['name']}」: {sheet.get('rows', 0)} 行 x {sheet.get('cols', 0)} 列\n"
+                    for preview in sheet.get('preview', []):
+                        ctx_block += f"  {preview}\n"
+                ctx_block += f"""
+文档说明：
+{document_context.get('note', '')}
+
+单元格引用格式：A1（第1行A列）、B2（第2行B列）。
+"""
         else:
-            ctx_block = """
+            if file_type in ("xlsx", "xls"):
+                ctx_block = """
+## 注意
+没有提供工作表内容。单元格引用格式：
+- "A1" / "B2"：直接用列字母+行数字
+- "第2行第3列"：中文描述
+position 参数：工作表内行号（从1开始）
+"""
+            else:
+                ctx_block = """
 ## 注意
 没有提供文档内容。position 可以用：
   - "第3段" / "最后一段" / "第一段"
   - "包含'关键词'的那段"（内容定位）
-  - "第3段后面"（相对位置）
-不要盲目猜测超出常规范围的值（建议不超过文档总段数的合理上限）。
+不要盲目猜测超出常规范围的值。
 """
 
-        prompt = f"""你是一个文档操作指令解析专家。请分析用户的自然语言指令，判断用户想要执行什么操作。
-
-【重要】用户指令可能包含：
-- "标红/标蓝/标绿" = 把文字颜色改成红色/蓝色/绿色
-- "把人名标红" = 找到包含"人名"的段落，把那段文字标红
-- "第二段标蓝" = 把文档第2段的内容标成蓝色
-
-支持的文档操作类型：
-## Word文档操作 (docx)
-- format_paragraph: 格式化段落（加粗、颜色、字号等）
+        # ── 2. 构建文件类型专属的 prompt ─────────────────────────────────
+        if file_type == "docx":
+            type_specific_prompt = """
+支持的文档操作类型（Word 文档）：
+## format_paragraph: 格式化段落（加粗、颜色、字号等）
   示例："把第一段加粗" → format_paragraph, position="第一段", bold=true
   示例："把第三段标红" → format_paragraph, position="第三段", color="FF0000"
   示例："把人名标蓝" → format_paragraph, position="包含'人名'的那段", color="0000FF"
-  示例："第二段设成红色" → format_paragraph, position="第二段", color="FF0000"
-  示例："把这段改成绿色" → format_paragraph, position="包含'这段'的那段", color="00FF00"
 
-- edit_paragraph: 编辑段落内容（修改/替换文字）
+## edit_paragraph: 编辑段落内容（修改/替换文字）
   示例："把第三段改成新内容" → edit_paragraph, position="第三段", new_content="新内容"
 
-- add_paragraph: 添加新段落
+## add_paragraph: 添加新段落
   示例："在开头添加一段" → add_paragraph, position="开头"
 
-- delete_paragraph: 删除段落
+## delete_paragraph: 删除段落
   示例："删除最后一段" → delete_paragraph, position="最后一段"
 
-- replace_text: 替换文本
+## replace_text: 替换文本
   示例："把所有的北京替换成上海" → replace_text, old_content="北京", new_content="上海"
 
+## format_heading / edit_heading / delete_heading: 标题操作
+  示例："把第一个标题加粗" → format_heading, position="第1个标题", bold=true
+
 【颜色格式要求】
-返回的 color 必须是十六进制格式，如：
-- 红色 → "FF0000"
-- 蓝色 → "0000FF"
-- 绿色 → "00FF00"
-- 黑色 → "000000"
-- 黄色 → "FFFF00"
+返回的 color 必须是十六进制格式：
+  红色→"FF0000" 蓝色→"0000FF" 绿色→"00FF00" 黑色→"000000" 黄色→"FFFF00"
 
 position 参数支持：
 1. 标准编号："第3段"、"第三段"、"第12段"
 2. 固定位置："最后一段"、"第一段"、"开头"
 3. 内容定位："包含'关键词'的那段"
+"""
+
+        elif file_type in ("xlsx", "xls"):
+            type_specific_prompt = """
+支持的文档操作类型（Excel 工作表）：
+## edit_cell: 编辑单元格值
+  示例："把A1改成100" → edit_cell, cell="A1", value=100
+  示例："把第2行第3列设成'测试'" → edit_cell, cell="第2行第3列", value="测试"
+  示例："在B5单元格写入'姓名'" → edit_cell, cell="B5", value="姓名"
+
+## format_cell: 格式化单元格（加粗、颜色、字号）
+  示例："把A1加粗" → format_cell, cell="A1", bold=true
+  示例："把B2标红" → format_cell, cell="B2", color="FF0000"
+  示例："把C3设成12号字" → format_cell, cell="C3", font_size=12
+
+## add_row: 添加行
+  示例："在第3行插入一行" → add_row, position=3
+  示例："在末尾添加一行" → add_row, position=None（或不传）
+
+## delete_row: 删除行
+  示例："删除第5行" → delete_row, position=5
+
+## add_column: 添加列
+  示例："在第2列后添加一列，标题设为'新列'" → add_column, position=3, header="新列"
+
+## delete_column: 删除列
+  示例："删除第4列" → delete_column, position=4
+
+## extract_table: 提取表格数据
+  示例："提取工作表1的内容" → extract_table, sheet_name="Sheet1"
+
+## calculate: 执行公式计算
+  示例："在D1单元格写入SUM公式" → calculate, formula="=SUM(A1:C1)", cell="D1"
+
+【单元格引用格式】
+- 直接格式："A1"、"B2"、"C3"
+- 中文格式："第2行第3列"、"第5行第2列"
+- 工作表指定：通过 sheet_name 参数
+
+【颜色格式要求】
+返回的 color 必须是十六进制格式：
+  红色→"FF0000" 蓝色→"0000FF" 绿色→"00FF00" 黑色→"000000" 黄色→"FFFF00"
+"""
+
+        else:
+            # PDF 或其他格式
+            type_specific_prompt = """
+支持的文档操作类型（PDF）：
+## extract_content: 提取内容
+  示例："提取所有文本" → extract_content, extract_type="all"
+
+## generate_summary: 生成摘要
+  示例："生成500字的摘要" → generate_summary, max_length=500
+
+position 参数：PDF 页码，从1开始
+"""
+
+        # ── 3. 拼接完整 prompt ───────────────────────────────────────────
+        prompt = f"""你是一个文档操作指令解析专家。请分析用户的自然语言指令，判断用户想要执行什么操作。
+
+【重要】用户指令可能包含：
+- "标红/标蓝/标绿" = 把文字颜色改成红色/蓝色/绿色
+- "把人名标红" = 找到包含"人名"的段落/单元格，把那部分标红
+- "第二段标蓝" / "B2单元格标蓝" = 对应位置标蓝
+
+{type_specific_prompt}
 
 {ctx_block}
 
