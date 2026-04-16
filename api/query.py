@@ -190,7 +190,7 @@ async def ask_stream(body: dict, db: Session = Depends(get_db)):
                 model=settings.llm_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
-                max_tokens=1500,
+                max_tokens=4000,
                 stream=True,
             )
 

@@ -391,12 +391,21 @@ async def extract_placeholders(body: dict, db: Session = Depends(get_db)):
         if fields:
             return {"fields": fields, "count": len(fields), "method": "placeholder"}
 
-        # 没有占位符 → 调用 LLM 智能分析模板内容，推断要填的字段
+        # 没有占位符 → xlsx 直接读表头，docx 则用 LLM 推断
+        if record.file_type == "xlsx":
+            # Excel 模板：表头行即字段名，直接读取，无需 LLM
+            xlsx_fields = _extract_xlsx_headers(record.file_path)
+            if xlsx_fields:
+                return {"fields": xlsx_fields, "count": len(xlsx_fields), "method": "headers"}
+
         text_content = _extract_template_text(record.file_path, record.file_type)
         if not text_content:
             return {"fields": [], "count": 0, "method": "none", "message": "模板内容为空"}
 
-        llm_fields = await _llm_extract_fields(text_content, record.file_type)
+        # 在线程池中运行同步 LLM 调用，避免阻塞 FastAPI 事件循环
+        llm_fields = await asyncio.get_event_loop().run_in_executor(
+            None, _llm_extract_fields_sync, text_content, record.file_type
+        )
         return {"fields": llm_fields, "count": len(llm_fields), "method": "llm"}
 
     except Exception as e:
@@ -463,10 +472,33 @@ def _extract_template_text(file_path: str, file_type: str) -> str:
     return ""
 
 
-async def _llm_extract_fields(text_content: str, file_type: str) -> list[str]:
+def _extract_xlsx_headers(file_path: str) -> list[str]:
     """
-    调用 LLM 智能分析模板内容，推断需要填写的字段。
-    例如：看到"合同金额"、"甲方"、"签署日期"等表头，推断出字段名。
+    读取 xlsx 第一个非空行作为字段名（表头行即字段）。
+    跳过全空行，取第一个包含内容的行的各列值。
+    """
+    from openpyxl import load_workbook
+    wb = load_workbook(file_path, data_only=True)
+    headers = []
+    seen = set()
+    for sheet in wb.worksheets:
+        for row in sheet.iter_rows(max_row=10, values_only=True):
+            vals = [str(c).strip() for c in row if c is not None and str(c).strip()]
+            if vals:
+                for v in vals:
+                    if v and v not in seen and len(v) <= 30:
+                        seen.add(v)
+                        headers.append(v)
+                break  # 只取第一个非空行
+        if headers:
+            break
+    wb.close()
+    return headers
+
+
+def _llm_extract_fields_sync(text_content: str, file_type: str) -> list[str]:
+    """
+    同步版本的 LLM 字段提取（在 run_in_executor 中调用，不阻塞事件循环）。
     """
     from openai import OpenAI
     from config import settings
@@ -485,26 +517,26 @@ async def _llm_extract_fields(text_content: str, file_type: str) -> list[str]:
 """
 
     client = OpenAI(
-        api_key=settings.llm_api_key, 
+        api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
-        default_headers=settings.openai_default_headers
+        default_headers=settings.openai_default_headers,
+        timeout=60.0,
     )
     resp = client.chat.completions.create(
         model=settings.llm_model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
-        max_tokens=300,
+        max_tokens=500,
     )
     raw = resp.choices[0].message.content or ""
+    raw = re.sub(r'<think>[\s\S]*?</think>', '', raw).strip()
 
-    # 解析 LLM 输出，每行一个字段名
     fields = []
     for line in raw.split("\n"):
         line = line.strip().strip("•-*1234567890.、 ")
         if line and 1 < len(line) <= 20:
             fields.append(line)
 
-    # 去重
     seen = set()
     unique = []
     for f in fields:

@@ -23,7 +23,9 @@ const pageByTab: Record<number, unknown> = {
 <template>
   <main class="flex-1 bg-bg overflow-y-auto">
     <div class="p-6">
-      <component :is="pageByTab[tab] ?? Upload" />
+      <keep-alive>
+        <component :is="pageByTab[tab] ?? Upload" :key="tab" />
+      </keep-alive>
     </div>
   </main>
 </template>

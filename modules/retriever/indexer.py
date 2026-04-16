@@ -18,44 +18,101 @@ from config import settings
 # ═══════════════════════════════════════════════════════════════════════
 class OllamaEmbedder:
     """
-    调用本地 Ollama Embedding API，接口与 SentenceTransformer 保持兼容。
-    模型: nomic-embed-text（推荐，高质量且 Ollama 内置支持）
+    调用 Embedding API（兼容 OpenAI /v1/embeddings 接口）。
+    支持本地 Ollama 和硅基流动等云端服务，通过 embed_base_url / embed_api_key 切换。
+
+    性能说明：
+    - /v1/embeddings 的 input 字段支持字符串数组，一次请求可编码多条文本
+    - 将所有 chunk 合并成一次请求，从 N×RTT 降低到 ceil(N/API_BATCH_SIZE)×RTT
+    - API_BATCH_SIZE 控制每批最多条数，防止单次请求体过大
     """
-    _API_BATCH = 1  # Ollama /v1/embeddings 单次只能接受 1 条
+    API_BATCH_SIZE = 8   # 每批最多条数（bge-m3 单条文本可达24k字符，8条已足够大，避免413）
+    MAX_CHARS = 6000     # bge-m3 支持8192 token≈24000字符，留余量取6000，截断兜底
+
+    @staticmethod
+    def _truncate(text: str) -> str:
+        """超长文本截断兜底（正常chunk不会触发，仅防止解析异常导致的超大块）"""
+        if len(text) <= OllamaEmbedder.MAX_CHARS:
+            return text
+        logger.warning(f"Embedding文本过长({len(text)}字符)，截断至{OllamaEmbedder.MAX_CHARS}字符")
+        return text[:OllamaEmbedder.MAX_CHARS]
 
     def __init__(self):
-        self._base_url = settings.llm_base_url.rstrip("/v1").rstrip("/")
-        self._model = settings.embed_model  # 如 "nomic-embed-text"
+        # 优先用专用 embed 配置，base_url 去掉末尾 /v1 后缀（统一在请求时拼接）
+        raw_url = settings.embed_base_url.rstrip("/")
+        if raw_url.endswith("/v1"):
+            raw_url = raw_url[:-3]
+        self._base_url = raw_url
+        self._model = settings.embed_model
+        self._api_key = settings.embed_api_key or settings.llm_api_key  # 兜底用 LLM key
+
+    def _build_headers(self) -> dict:
+        """构造请求头：自动加 Authorization，支持硅基流动等需要鉴权的服务"""
+        headers = {"Content-Type": "application/json"}
+        if self._api_key and self._api_key.lower() not in ("", "ollama", "none"):
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        if "ngrok" in self._base_url:
+            headers["ngrok-skip-browser-warning"] = "true"
+        return headers
+
+    def _embed_batch(self, texts: list, headers: dict) -> list:
+        """向 API 发送一批文本，返回向量列表（顺序与 texts 一致）"""
+        import requests as _requests
+        resp = _requests.post(
+            f"{self._base_url}/v1/embeddings",
+            json={"model": self._model, "input": texts},
+            headers=headers,
+            timeout=300,  # 批量请求给更长超时
+        )
+        resp.raise_for_status()
+        body = resp.json()
+
+        if "data" in body and body["data"]:
+            # OpenAI 格式：data 是按 index 排列的对象列表
+            sorted_data = sorted(body["data"], key=lambda x: x.get("index", 0))
+            return [d["embedding"] for d in sorted_data]
+        elif "embedding" in body:
+            # 单条返回时的旧格式兜底
+            return [body["embedding"]]
+        else:
+            raise ValueError(f"无法解析 Embedding 响应: keys={list(body.keys())}")
 
     def encode(self, sentences, normalize_embeddings: bool = False,
                convert_to_numpy: bool = True, batch_size: int = None):
-        import requests as _requests
-
         single = isinstance(sentences, str)
         if single:
             sentences = [sentences]
 
+        headers = self._build_headers()
+        effective_batch = batch_size or self.API_BATCH_SIZE
         all_vecs: list = []
-        for text in sentences:
-            _headers = {}
-            if self._base_url and "ngrok" in self._base_url:
-                _headers["ngrok-skip-browser-warning"] = "true"
 
-            # /v1/embeddings 为 OpenAI 兼容接口，字段必须是 input，不能用 prompt（prompt 仅用于 /api/embeddings）
-            resp = _requests.post(
-                f"{self._base_url}/v1/embeddings",
-                json={"model": self._model, "input": text},
-                headers=_headers,
-                timeout=120,
-            )
-            resp.raise_for_status()
-            body = resp.json()
-            if "data" in body and body["data"]:
-                all_vecs.append(body["data"][0]["embedding"])
-            elif "embedding" in body:
-                all_vecs.append(body["embedding"])
-            else:
-                raise ValueError(f"无法解析 Ollama 向量响应: keys={list(body.keys())}")
+        for i in range(0, len(sentences), effective_batch):
+            batch = sentences[i: i + effective_batch]
+            try:
+                vecs = self._embed_batch(batch, headers)
+            except Exception as e:
+                # 批量失败时降级为逐条，避免因单条超长文本导致整批失败
+                logger.warning(f"批量 embedding 失败({e})，降级为逐条模式（{len(batch)} 条）")
+                import requests as _requests
+                vecs = []
+                for text in batch:
+                    safe_text = self._truncate(text)  # 逐条兜底截断，防止单条413
+                    resp = _requests.post(
+                        f"{self._base_url}/v1/embeddings",
+                        json={"model": self._model, "input": safe_text},
+                        headers=headers,
+                        timeout=120,
+                    )
+                    resp.raise_for_status()
+                    body = resp.json()
+                    if "data" in body and body["data"]:
+                        vecs.append(body["data"][0]["embedding"])
+                    elif "embedding" in body:
+                        vecs.append(body["embedding"])
+                    else:
+                        raise ValueError(f"无法解析 Embedding 响应: keys={list(body.keys())}")
+            all_vecs.extend(vecs)
 
         arr = np.array(all_vecs, dtype=np.float32)
 
@@ -120,6 +177,79 @@ def _get_chroma_client() -> chromadb.PersistentClient:
             settings=ChromaSettings(anonymized_telemetry=False)
         )
     return _chroma_client
+
+
+def _check_and_fix_dimension_mismatch():
+    """
+    启动时检查 ChromaDB 向量维度是否与当前 embedding 模型一致。
+    若不一致（换了模型），自动清空 chroma 目录并重建，避免 'Cannot open header file'。
+    """
+    import shutil
+
+    dim_file = os.path.join(settings.chroma_path, ".embed_dim")
+
+    # 获取当前模型的实际维度（发一条测试请求）
+    try:
+        model = _get_embed_model()
+        test_vec = model.encode("test", convert_to_numpy=True)
+        current_dim = int(test_vec.shape[-1]) if hasattr(test_vec, 'shape') else len(test_vec)
+    except Exception as e:
+        logger.warning(f"维度检查：无法获取当前 embedding 维度，跳过检查: {e}")
+        return
+
+    # 读取上次记录的维度
+    if os.path.exists(dim_file):
+        try:
+            saved_dim = int(open(dim_file).read().strip())
+        except Exception:
+            saved_dim = None
+
+        if saved_dim != current_dim:
+            logger.warning(
+                f"⚠️  Embedding 维度变更：{saved_dim} → {current_dim}（模型已更换）。"
+                f"自动清空 ChromaDB 索引，请重新上传文件。"
+            )
+            # 关闭旧客户端
+            global _chroma_client, _bm25_corpus, _bm25_doc_map, _bm25_records, _indexed_files, _tokenized_corpus_pkl
+            _chroma_client = None
+            _bm25_corpus = []
+            _bm25_doc_map = {}
+            _bm25_records = []
+            _indexed_files = set()
+            _tokenized_corpus_pkl = []
+
+            # 删除 chroma 目录内容（保留目录本身）
+            for item in os.listdir(settings.chroma_path):
+                item_path = os.path.join(settings.chroma_path, item)
+                if item == ".embed_dim":
+                    continue
+                try:
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    else:
+                        os.remove(item_path)
+                except Exception as ex:
+                    logger.warning(f"清理 chroma 文件失败: {item_path}: {ex}")
+
+            # 同步清空 SQLite 文件记录，前端不再显示旧文件
+            try:
+                from db.database import SessionLocal
+                from db.models import FileRecord, TaskRecord
+                _db = SessionLocal()
+                _db.query(TaskRecord).delete()
+                _db.query(FileRecord).delete()
+                _db.commit()
+                _db.close()
+                logger.info("已清空 SQLite 文件记录（维度变更触发）")
+            except Exception as ex:
+                logger.warning(f"清空 SQLite 记录失败: {ex}")
+
+    # 写入当前维度
+    try:
+        with open(dim_file, "w") as f:
+            f.write(str(current_dim))
+    except Exception as e:
+        logger.warning(f"写入维度记录失败: {e}")
 
 
 def _rebuild_bm25_views():
@@ -229,7 +359,7 @@ def _save_bm25_index(tokenized_corpus: list = None) -> bool:
                 "indexed_files": list(_indexed_files),
                 "tokenized_corpus": tokenized_corpus if tokenized_corpus is not None else [],
             }, f)
-        logger.info(f"BM25 索引已持久化: {bm25_path}, 分词语料 {len(tokenized_corpus) if tokenized_corpus else 0} 条, 版本 v{INDEX_VERSION}")
+        logger.info(f"BM25 索引已持久化: {bm25_path}, 分词语料 {len(tokenized_corpus) if tokenized_corpus is not None else 0} 条, 版本 v{INDEX_VERSION}")
         return True
     except Exception as e:
         logger.error(f"持久化 BM25 索引失败: {e}")
@@ -264,6 +394,9 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False,
     if not chunks:
         logger.warning(f"文档 {file_id} 没有 chunks，跳过索引构建")
         return False
+
+    # 维度校验：换模型后自动清空旧索引，避免 'Cannot open header file'
+    _check_and_fix_dimension_mismatch()
 
     if not force_rebuild:
         _load_bm25_index()
@@ -309,13 +442,11 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False,
         all_contents = [c["content"] for c in chunk_data_list]
         logger.info(f"开始批量编码 {len(all_contents)} 条文本，batch_size={BATCH_SIZE}")
 
-        all_embeddings = []
-        for i in range(0, len(all_contents), BATCH_SIZE):
-            batch = all_contents[i:i + BATCH_SIZE]
-            batch_embeddings = model.encode(batch, convert_to_numpy=True)
-            all_embeddings.extend(batch_embeddings.tolist())
-            pct = 71 + int((i + BATCH_SIZE) / len(all_contents) * 18)
-            _pct(min(89, pct), f"编码进度 {min(i + BATCH_SIZE, len(all_contents))}/{len(all_contents)}...")
+        # 一次性发送所有文本给 OllamaEmbedder（内部已按 API_BATCH_SIZE 分批）
+        # 相比原来的逐条请求，HTTP 往返次数从 N 降低到 ceil(N/32)
+        _pct(72, f"开始批量编码 {len(all_contents)} 条文本（单次最多 {model.API_BATCH_SIZE} 条）...")
+        all_embeddings = model.encode(all_contents, convert_to_numpy=True).tolist()
+        _pct(89, f"编码完成，共 {len(all_embeddings)} 条向量")
 
         logger.info(f"批量编码完成: {len(all_embeddings)} 条")
 
@@ -358,7 +489,8 @@ def build_index(parsed_doc: dict, force_rebuild: bool = False,
         return True
 
     except Exception as e:
-        logger.error(f"索引构建失败: {e}")
+        import traceback
+        logger.error(f"索引构建失败: {e}\n{traceback.format_exc()}")
         return False
 
 
@@ -485,9 +617,11 @@ def clear_all_indexes() -> bool:
         _indexed_files = set()
         _tokenized_corpus_pkl = []
 
-        bm25_path = os.path.join(settings.chroma_path, "bm25_index.pkl")
-        if os.path.exists(bm25_path):
-            os.remove(bm25_path)
+        bm25_path_pkl = os.path.join(settings.chroma_path, "bm25_index.pkl")
+        bm25_path_bm25 = os.path.join(settings.chroma_path, "bm25_index.bm25")
+        for bm25_path in [bm25_path_pkl, bm25_path_bm25]:
+            if os.path.exists(bm25_path):
+                os.remove(bm25_path)
 
         _invalidate_retriever_runtime()
 

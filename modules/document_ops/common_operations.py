@@ -1085,6 +1085,28 @@ class OperationExecutor:
                 cell_ref=params.get('cell')
             )
 
+        elif op_type == OperationType.CONDITIONAL_FORMAT:
+            return self.ops.conditional_format(
+                column=params.get('column'),
+                condition=params.get('condition', ''),
+                color=params.get('color', 'FF0000'),
+                sheet_name=params.get('sheet_name')
+            )
+
+        elif op_type == OperationType.CONDITIONAL_DELETE:
+            return self.ops.conditional_delete(
+                column=params.get('column'),
+                condition=params.get('condition', ''),
+                sheet_name=params.get('sheet_name')
+            )
+
+        elif op_type == OperationType.CONDITIONAL_FILTER:
+            return self.ops.conditional_filter(
+                column=params.get('column'),
+                condition=params.get('condition', ''),
+                sheet_name=params.get('sheet_name')
+            )
+
         return {'success': False, 'message': f'未实现操作: {op_type}'}
 
     def _execute_pdf_operation(self, op_type: str, params: Dict) -> Dict[str, Any]:

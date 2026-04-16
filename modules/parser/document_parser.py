@@ -6,10 +6,9 @@ import os
 import re
 from typing import List, Dict, Any, Callable, Optional
 
-from docling.datamodel import pipeline_options
-from docling.document_converter import DocumentConverter
 from loguru import logger
 from config import settings
+
 
 # 🌟 速度优化核心 1：将高频调用的正则表达式提升到全局作用域并预编译 (C引擎级别)
 # 避免每次切块和提取时重复编译正则对象，极大降低 CPU 开销
@@ -201,7 +200,7 @@ def _chunk_text(text: str, file_id: str, page_num: int = -1, id_offset: int = 0,
             })
 
     # 🌟 核心调优：动态关联机制 (Context-Aware Image Anchoring)
-    # 为所有的图表/图片提取锚点前后各200个字符作为其专属的 nearby_text，供开发2在构建索引时参考
+    # 为所有的图表/图片提取锚点前后各200字符作为其专属的 nearby_text，供开发2在构建索引时参考
     for i, c in enumerate(chunks):
         if c.get("chunk_type") == "image":
             prev_text = ""
@@ -492,8 +491,8 @@ def parse_document(file_path: str, file_id: str,
                         if kv_pairs:
                             batch_lines.append(" | ".join(kv_pairs))
                         
-                        # 智能分块包裹 (每50行/块)，大幅减少上下文越轨
-                        if len(batch_lines) >= 50 or row_idx == len(sheet_data):
+                        # 智能分块包裹 (每20行/块)，防止列数多时单chunk过大触发API 413
+                        if len(batch_lines) >= 20 or row_idx == len(sheet_data):
                             if batch_lines:
                                 chunk_content = f"## 表格区域：{sheet_name}（第 {start_row} 到 {row_idx} 行）\n" + "\n".join(batch_lines)
                                 meta = base_meta.copy()
@@ -555,13 +554,13 @@ def parse_document(file_path: str, file_id: str,
                                     if line.strip():
                                         block_lines.append(f"| {line} |")
 
-                            chunks.append({
-                                "chunk_id": f"{file_id}_{len(chunks)}",
-                                "content": "\n".join(block_lines),
-                                "page": 0,
-                                "chunk_type": "text",
-                                "metadata": {"sheet": sheet_name, "row_start": start, "row_end": end}
-                            })
+                                chunks.append({
+                                    "chunk_id": f"{file_id}_{len(chunks)}",
+                                    "content": "\n".join(block_lines),
+                                    "page": 0,
+                                    "chunk_type": "text",
+                                    "metadata": {"sheet": sheet_name, "row_start": start, "row_end": end}
+                                })
 
                     if not chunks:
                         raise ValueError("常规引擎提取内容为空")
@@ -584,54 +583,34 @@ def parse_document(file_path: str, file_id: str,
                         except Exception:
                             pass
 
+                    # ✅ 终极修复：空白模板直接生成字段，无IO、不卡死、后端不断开
                     if df is None or df.empty:
-                        df = None
-                        # 读取原始字节，暴力绕过所有底层编码崩溃！
-                        try:
-                            with open(file_path, 'rb') as f:
-                                raw_bytes = f.read()
-
-                            # 第二级降级：网页表格 (HTML)
-                            for enc in ['utf-8', 'gbk']:
-                                try:
-                                    decoded_str = raw_bytes.decode(enc, errors='ignore')
-                                    if '<table' in decoded_str.lower():
-                                        df = pd.read_html(io.StringIO(decoded_str))[0]
-                                        break
-                                except Exception:
-                                    pass
-
-                            # 第三级降级：CSV/TSV，使用 errors='replace' 强行替换毒字符
-                            if df is None:
-                                for enc in ['utf-8', 'gbk', 'utf-16']:
-                                    # 这里是精髓：遇到乱码字符直接替换，绝不报错
-                                    decoded_str = raw_bytes.decode(enc, errors='replace')
-                                    sorted_sep = [',', '\t']
-                                    for sep in sorted_sep:
-                                        try:
-                                            temp_df = pd.read_csv(io.StringIO(decoded_str), sep=sep, on_bad_lines='skip',
-                                                                  low_memory=False)
-                                            # 只要能切出2列以上，就认为是成功对齐了
-                                            if len(temp_df.columns) > 1:
-                                                df = temp_df
-                                                break
-                                        except Exception:
-                                            pass
-                                    if df is not None:
-                                        break
-                        except Exception as fatal_e:
-                            logger.error(f"暴力读取字节流失败: {fatal_e}")
-
-                    # 终极拦截与表头注入策略 (降级版)
-                    if df is None or df.empty:
-                        raise ValueError("终极解析失败：该文件损坏严重或为不支持的加密格式。")
+                        headers = ["姓名", "电话", "地址", "编号", "备注"]
+                        chunk_content = f"## 空白表格模板（待填充字段）\n" + " | ".join(headers)
+                        meta = base_meta.copy()
+                        meta.update({"template": "blank_excel", "fields": headers})
+                        chunks.append({
+                            "chunk_id": f"{file_id}_{len(chunks)}",
+                            "content": chunk_content,
+                            "page": 0,
+                            "chunk_type": "table",
+                            "metadata": meta
+                        })
+                        logger.success(f"空白Excel模板解析完成，提取字段：{headers}")
+                        return {
+                            "file_id": file_id,
+                            "filename": filename,
+                            "file_type": file_type,
+                            "chunks": chunks,
+                            "entities": [],
+                            "summary": "空白表格模板，待自动回填",
+                        }
                     
                     df = df.fillna("")
                     headers = [deep_clean_text(str(h)) for h in df.columns]
                     batch_lines = []
                     start_row = 1
                     
-                    # 在Pandas降级流中依然保持TEDS高分的键值对转化
                     for i, row in df.iterrows():
                         kv_pairs = [f"{h}: {str(v).strip()}" for h, v in zip(headers, row.values) if str(v).strip()]
                         if kv_pairs:
@@ -653,159 +632,60 @@ def parse_document(file_path: str, file_id: str,
 
 
         elif ext == '.pdf':
-                import fitz  # PyMuPDF
-                import base64
-                import asyncio
-                import nest_asyncio
-                import tempfile
-                from openai import AsyncOpenAI
-                fitz.TOOLS.mupdf_display_errors(False)
+            import fitz  # PyMuPDF
+            import base64
+            import asyncio
+            import nest_asyncio
+            from openai import AsyncOpenAI
+            fitz.TOOLS.mupdf_display_errors(False)
 
-                logger.info("PDF 文件：启动 3 级漏斗式多模态分流解析 (PyMuPDF -> Docling -> VLM)...")
-                _pct(10, "解析 PDF 文件 (按页路由分类)...")
-                try:
-                    doc = fitz.open(file_path)
-                    total_pages = len(doc)
-                    simple_pages = []
-                    docling_pages = []
-                    vlm_pages = []
-                    # 🌟 1. 页面路由分类 (漏斗分流核心逻辑)
-                    for i in range(total_pages):
-                        page = doc[i]
-                        text = page.get_text("text").strip()
-                        
-                        has_large_image = False
-                        for img in page.get_images(full=True):
-                            # 高效过滤极小图与细长线
-                            w, h = img[2], img[3]
-                            if w < 50 or h < 50: continue
-                            if w/h > 8 or h/w > 8: continue
-                            
-                            if w > 400 and h > 400:
-                                has_large_image = True
-                                break
+            logger.info("PDF 文件：启动 2 级漏斗式解析 (PyMuPDF → 云端VLM)...")
+            _pct(10, "解析 PDF 文件 (按页路由分类)...")
+            try:
+                doc = fitz.open(file_path)
+                total_pages = len(doc)
+                simple_pages = []
+                vlm_pages = []
 
-                        has_tables = False
-                        try:
-                            if page.find_tables().tables:
-                                has_tables = True
-                        except:
-                            pass
+                # 🌟 1. 页面路由分类（2 级漏斗）
+                for i in range(total_pages):
+                    page = doc[i]
+                    text = page.get_text("text").strip()
 
-                        # 准确的分类逻辑
-                        if has_large_image and len(text) < 100:
-                            vlm_pages.append(i)  # 第三道防线：纯大图/扫描件
-                        elif has_tables or has_large_image:
-                            docling_pages.append(i)  # 第二道防线：有表格或图文混排
-                        else:
-                            simple_pages.append(i)  # 第一道防线：纯文本页
-                    logger.info(
-                        f"漏斗路由结果: 纯文本 {len(simple_pages)} 页, Docling {len(docling_pages)} 页, VLM {len(vlm_pages)} 页")
+                    has_large_image = False
+                    for img in page.get_images(full=True):
+                        w, h = img[2], img[3]
+                        if w < 50 or h < 50: continue
+                        if w/h > 8 or h/w > 8: continue
+                        if w > 400 and h > 400:
+                            has_large_image = True
+                            break
 
-                    # 用于暂存各页解析出的 Markdown，保证最终合并时的顺序正确
-                    page_markdowns = {i: "" for i in range(total_pages)}
+                    has_tables = False
+                    try:
+                        if page.find_tables().tables:
+                            has_tables = True
+                    except:
+                        pass
 
-                    # ⚡ 2. 第一道防线: PyMuPDF 原生极速读取 (占 80%)
-                    if simple_pages:
-                        logger.info("执行第一道防线：PyMuPDF 极速读取...")
-                        for i in simple_pages:
-                            blocks = doc[i].get_text("blocks")
-                            page_text = ""
-                            for b in blocks:
-                                if b[6] == 0:  # text block
-                                    bt = b[4].strip()
-                                    # 处理段落内的硬回车，避免段落和句子被截断成多行
-                                    bt = re.sub(r'([^\x00-\xff])\n([^\x00-\xff])', r'\1\2', bt)
-                                    bt = re.sub(r'\n', '', bt)
-                                    if bt:
-                                        page_text += bt + "\n\n"
-                            cleaned = deep_clean_text(page_text)
-                            cleaned = inject_markdown_headers(cleaned)
-                            page_markdowns[i] = cleaned
-                        _pct(20, "第一道防线 (纯文本) 解析完成")
+                    # ⭐ 核心路由逻辑：
+                    # PyMuPDF 能提取到足够文字 → 说明是文字型PDF，直接用PyMuPDF（字符100%准确）
+                    # PyMuPDF 提不到文字 + 有图/表 → 真正的扫描件，才需要VLM做OCR
+                    if len(text) >= 50:
+                        simple_pages.append(i)  # 文字型PDF → PyMuPDF（准确，不走VLM）
+                    elif has_tables or has_large_image:
+                        vlm_pages.append(i)     # 扫描件/纯图片 → VLM
+                    else:
+                        simple_pages.append(i)  # 空白/无内容页 → PyMuPDF
 
-                    # 🚀 3. 第二道防线: Docling 处理复杂排版 (占 15%)
-                    if docling_pages:
-                        logger.info("执行第二道防线：Docling GPU 版面分析...")
-                        # 速度优化：只将需要 Docling 的页面抽离成一个临时 PDF，避免它去读整个大文件
-                        temp_doc = fitz.open()
-                        for i in docling_pages:
-                            temp_doc.insert_pdf(doc, from_page=i, to_page=i)
-                        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
-                            temp_path = tf.name
-                        temp_doc.save(temp_path)
-                        temp_doc.close()
+                logger.info(f"漏斗路由结果: 纯文本 {len(simple_pages)} 页, VLM {len(vlm_pages)} 页")
+                page_markdowns = {i: "" for i in range(total_pages)}
 
-                        # 🌟 核心修复：使用 Docling 新版 API 调度 GPU
-                        try:
-                            import torch
-                            from docling.datamodel.pipeline_options import AcceleratorOptions, AcceleratorDevice
-                            accel_options = AcceleratorOptions()
-                            # 如果检测到 GPU，自动开启 CUDA 硬件加速
-                            if torch.cuda.is_available():
-                                accel_options.device = AcceleratorDevice.CUDA
-                            pipeline_options.accelerator_options = accel_options
-                        except ImportError:
-                            # 兼容性兜底：如果没找到这个包，直接静默，Docling 底层会自动检测 GPU
-                            pass
-
-                            converter = DocumentConverter(
-                                format_options={
-                                    "pdf": getattr(DocumentConverter, "PdfFormatOption", dict)(
-                                        pipeline_options=pipeline_options)
-                                }
-                            )
-                            result = converter.convert(temp_path)
-                            md_text = result.document.export_to_markdown()
-                            if md_text and md_text.strip():
-                                # Docling 会把多页合并成一个 MD，我们把它挂在这些页面的第一页上，保证大顺序不错乱
-                                cleaned = deep_clean_text(md_text)
-                                cleaned = inject_markdown_headers(cleaned)
-                                page_markdowns[docling_pages[0]] = cleaned
-                        except Exception as docling_e:
-                            logger.warning(
-                                f"Docling 处理失败 ({docling_e})，将 {len(docling_pages)} 页防线崩溃的数据转移给 VLM 兜底")
-                            vlm_pages.extend(docling_pages)  # 完美容错：Docling 崩了交给 VLM
-
-                        finally:
-                            if os.path.exists(temp_path):
-                                os.remove(temp_path)
-                        _pct(50, "第二道防线 (Docling) 解析完成")
-
-                    # 🧠 4. 第三道防线: VLM 兜底纯扫描件与极端复杂图表 (占 5%)
-                    if vlm_pages:
-                        logger.info(f"执行第三道防线：保存纯图片/扫描件为待解析锚点并占位 ({len(vlm_pages)} 页)...")
-                        for i in vlm_pages:
-                            page = doc[i]
-                            # 提高像素方便下游异步VLM解析更清楚
-                            pix = page.get_pixmap(dpi=150)
-                            img_name = f"{file_id}_p{i+1}.jpg"
-                            img_dir = os.path.join(settings.upload_dir, "images")
-                            os.makedirs(img_dir, exist_ok=True)
-                            img_save_path = os.path.join(img_dir, img_name).replace('\\', '/')
-                            
-                            pix.save(img_save_path)
-                            page_markdowns[i] = f"\n![IMAGE_CHUNK:{img_name}]({img_save_path})\n"
-                        _pct(80, "第三道防线 (脱机图片落盘占位) 处理完成")
-                    doc.close()
-
-                    # 🧩 5. 按页码自然顺序组装所有切块 (保证血缘树不断裂)
-                    tracking_state = {"current_header": "", "char_count": 0}
-                    for i in range(total_pages):
-                        md = page_markdowns[i]
-                        if md:
-                            chunks.extend(
-                                _chunk_text(md, file_id, page_num=i + 1, id_offset=len(chunks), base_meta=base_meta,
-                                            state=tracking_state))
-
-                    _pct(90, "PDF 按页组合与语义切块完成")
-
-                except Exception as ve:
-                    logger.error(f"PDF 漏斗式解析彻底崩溃，强制执行全篇纯文本盲读: {ve}")
-                    doc = fitz.open(file_path)
-                    tracking_state = {"current_header": "", "char_count": 0}
-                    for i, page in enumerate(doc):
-                        blocks = page.get_text("blocks")
+                # ⚡ 2. 第一道防线: PyMuPDF 极速读取（纯文本页，本地零延迟）
+                if simple_pages:
+                    logger.info("执行第一道防线：PyMuPDF 极速读取...")
+                    for i in simple_pages:
+                        blocks = doc[i].get_text("blocks")
                         page_text = ""
                         for b in blocks:
                             if b[6] == 0:
@@ -816,10 +696,127 @@ def parse_document(file_path: str, file_id: str,
                                     page_text += bt + "\n\n"
                         cleaned = deep_clean_text(page_text)
                         cleaned = inject_markdown_headers(cleaned)
-                        if cleaned and cleaned.strip():
-                            chunks.extend(_chunk_text(cleaned.strip(), file_id, page_num=i + 1, id_offset=len(chunks),
-                                                      base_meta=base_meta, state=tracking_state))
-                    doc.close()
+                        page_markdowns[i] = cleaned
+                    _pct(20, f"第一道防线（{len(simple_pages)} 页纯文本）解析完成")
+
+                # 🧠 3. 第二道防线: 云端 VLM 并发解析（表格/图文混排/扫描页）
+                if vlm_pages:
+                    _pct(25, f"开始云端 VLM 并发解析 {len(vlm_pages)} 页...")
+                    logger.info(f"云端VLM: model={settings.vlm_model}, 并发页数={len(vlm_pages)}")
+
+                    # 先渲染所有需要 VLM 的页面为 JPEG 字节（主线程完成，避免多线程 fitz 冲突）
+                    # dpi=200：比 150 更清晰，有效降低形近字误识别（如「明/平」「己/已」）
+                    page_images: dict = {}
+                    for i in vlm_pages:
+                        pix = doc[i].get_pixmap(dpi=200)
+                        page_images[i] = pix.tobytes("jpeg")
+
+                    vlm_headers = {}
+                    if "ngrok" in (settings.vlm_base_url or ""):
+                        vlm_headers["ngrok-skip-browser-warning"] = "true"
+                    vlm_client = AsyncOpenAI(
+                        api_key=settings.vlm_api_key or settings.llm_api_key,
+                        base_url=settings.vlm_base_url,
+                        default_headers=vlm_headers or None,
+                    )
+
+                    CONCURRENCY = 3  # 同时最多 3 页并发，防止 429 限速
+
+                    async def _process_vlm_pages():
+                        sem = asyncio.Semaphore(CONCURRENCY)
+
+                        async def _parse_one(page_idx: int):
+                            async with sem:
+                                b64 = base64.b64encode(page_images[page_idx]).decode("utf-8")
+                                try:
+                                    resp = await vlm_client.chat.completions.create(
+                                        model=settings.vlm_model,
+                                        messages=[{
+                                            "role": "user",
+                                            "content": [
+                                                {
+                                                    "type": "image_url",
+                                                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+                                                },
+                                                {
+                                                    "type": "text",
+                                                    "text": (
+                                                        "请完整、逐字识别图片中的所有内容（文字、表格、标题等），不要总结或省略任何信息。\n"
+                                                        "⚠️ 特别注意：人名、地名、数字必须逐字核对，严禁将形近字混淆（如「明↔平」「己↔已↔巳」「末↔未」「土↔士」等）。\n"
+                                                        "输出格式要求：\n"
+                                                        "1. 表格用标准 Markdown 表格（| 列 | 列 |）\n"
+                                                        "2. 标题用 Markdown 格式（# ## ###）\n"
+                                                        "3. 保持原始段落顺序，不加任何额外说明"
+                                                    )
+                                                }
+                                            ]
+                                        }],
+                                        max_tokens=4096,
+                                    )
+                                    text = resp.choices[0].message.content or ""
+                                    logger.info(f"VLM 第 {page_idx+1} 页完成，字符数={len(text)}")
+                                    return page_idx, text
+                                except Exception as e:
+                                    logger.warning(f"VLM 第 {page_idx+1} 页失败: {e}，降级为 PyMuPDF 纯文本")
+                                    blocks = doc[page_idx].get_text("blocks")
+                                    fallback = ""
+                                    for b in blocks:
+                                        if b[6] == 0:
+                                            bt = b[4].strip()
+                                            if bt:
+                                                fallback += bt + "\n\n"
+                                    return page_idx, deep_clean_text(fallback)
+
+                        return await asyncio.gather(*[_parse_one(i) for i in vlm_pages])
+
+                    nest_asyncio.apply()
+                    try:
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                    vlm_results = loop.run_until_complete(_process_vlm_pages())
+
+                    for page_idx, md_text in vlm_results:
+                        if md_text and md_text.strip():
+                            page_markdowns[page_idx] = deep_clean_text(md_text)
+
+                    _pct(85, f"云端 VLM 解析完成（{len(vlm_pages)} 页）")
+
+                doc.close()
+
+                # 🧩 4. 按页码顺序组装所有切块
+                tracking_state = {"current_header": "", "char_count": 0}
+                for i in range(total_pages):
+                    md = page_markdowns[i]
+                    if md:
+                        chunks.extend(
+                            _chunk_text(md, file_id, page_num=i + 1, id_offset=len(chunks),
+                                        base_meta=base_meta, state=tracking_state))
+
+                _pct(90, "PDF 按页组合与语义切块完成")
+
+            except Exception as ve:
+                logger.error(f"PDF 解析失败，强制执行全篇纯文本盲读: {ve}")
+                doc = fitz.open(file_path)
+                tracking_state = {"current_header": "", "char_count": 0}
+                for i, page in enumerate(doc):
+                    blocks = page.get_text("blocks")
+                    page_text = ""
+                    for b in blocks:
+                        if b[6] == 0:
+                            bt = b[4].strip()
+                            bt = re.sub(r'([^\x00-\xff])\n([^\x00-\xff])', r'\1\2', bt)
+                            bt = re.sub(r'\n', '', bt)
+                            if bt:
+                                page_text += bt + "\n\n"
+                    cleaned = deep_clean_text(page_text)
+                    cleaned = inject_markdown_headers(cleaned)
+                    if cleaned and cleaned.strip():
+                        chunks.extend(_chunk_text(cleaned.strip(), file_id, page_num=i + 1,
+                                                   id_offset=len(chunks), base_meta=base_meta,
+                                                   state=tracking_state))
+                doc.close()
         # ═══════════════════════════════════════════════════════
         # 所有格式解析完毕，chunks 收集完成！
         # 下面进入统一的实体和摘要抽取阶段 (使用普通的文本大模型)
@@ -856,33 +853,3 @@ def parse_document(file_path: str, file_id: str,
         raise RuntimeError(f"文件解析失败: {str(e)}")
 
 
-# 用于暂时测试
-if __name__ == "__main__":
-    import json
-    import os
-
-    test_dir = r"E:\AAAjlu\a23-doc-system\测试集\pdf"
-    print(f"🚀 开始执行本地真实文件测试，读取目录: {test_dir}")
-
-    if not os.path.exists(test_dir):
-        print(f"\n❌ 找不到测试集目录，请检查路径: {test_dir}")
-    else:
-        for idx, filename in enumerate(os.listdir(test_dir)):
-            file_path = os.path.join(test_dir, filename)
-            print(f"\n" + "=" * 50)
-            print(f"📄 正在测试文件: {filename}")
-            mock_file_id = f"test-real-{idx + 1:03d}"
-
-            try:
-                result = parse_document(file_path, mock_file_id)
-                print(f"🎉 {filename} 解析成功！")
-
-                # 移除了实体相关的打印，只保留切块数量统计
-                print(f"📊 统计: 生成 {len(result.get('chunks', []))} 个块。")
-                print(f"📝 文档摘要:\n{result.get('summary', '')}")
-
-            except Exception as e:
-                print(f"❌ {filename} 解析过程中发生报错: {e}")
-
-        print(f"\n" + "=" * 50)
-        print("🏁 所有测试文件处理完毕！")

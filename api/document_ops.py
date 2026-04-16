@@ -141,8 +141,8 @@ async def operate_document(body: OperationRequest, db: Session = Depends(get_db)
     if body.create_backup:
         backup_path = _create_backup(record.file_path)
     
-    # 解析指令
-    operation = parse_operation(body.instruction, record.file_type)
+    # 解析指令（带文件路径，让 LLM 看到文档结构）
+    operation = parse_operation(body.instruction, record.file_type, file_path=record.file_path)
     
     if operation.operation_type == "unknown":
         return {
@@ -174,39 +174,85 @@ async def operate_document(body: OperationRequest, db: Session = Depends(get_db)
 
 
 class PreviewRequest(BaseModel):
-    """预览操作请求（不需要真实文件）"""
+    """预览操作请求"""
+    file_id: str = Field(..., description="文件ID")
     instruction: str = Field(..., description="自然语言操作指令")
-    file_type: Optional[str] = Field("docx", description="文件类型: docx/xlsx")
 
 
-@router.post("/preview", summary="预览操作结果")
+@router.post("/preview", summary="预览操作结果（dry-run）")
 async def preview_operation(body: PreviewRequest, db: Session = Depends(get_db)):
     """
-    预览操作结果（不实际修改文件）
+    预览操作结果（不实际修改文件）。
 
-    返回解析后的操作类型和参数，用于确认操作
-    注意：此接口不需要真实文件ID，仅用于解析指令
-
-    示例请求：
-    {
-        "instruction": "把第二段改成'新内容'",
-        "file_type": "docx"
-    }
+    对于条件操作（conditional_format / conditional_delete / conditional_filter），
+    会读取文件内容，返回将受影响的具体单元格/行列表。
+    对于其他操作，返回解析后的操作类型和参数。
     """
-    # 解析指令（不验证文件）
-    operation = parse_operation(body.instruction, body.file_type)
+    record = _get_file_record(body.file_id, db)
+    file_type = record.file_type
 
-    return {
+    operation = parse_operation(body.instruction, file_type, file_path=record.file_path)
+
+    base = {
         "instruction": body.instruction,
-        "file_type": body.file_type,
+        "file_type": file_type,
         "parsed_operation": {
             "type": operation.operation_type,
             "confidence": operation.confidence,
             "parameters": operation.parameters,
-            "reasoning": operation.reasoning
+            "reasoning": operation.reasoning,
         },
-        "supported": operation.operation_type != "unknown"
+        "supported": operation.operation_type != "unknown",
     }
+
+    # ── dry-run：条件操作预览 ──────────────────────────────────────
+    op = operation.operation_type
+    params = operation.parameters
+    if file_type in ("xlsx", "xls") and op in (
+        "conditional_format", "conditional_delete", "conditional_filter"
+    ):
+        try:
+            ops = ExcelDocumentOperations(record.file_path)
+            column = params.get("column")
+            condition = params.get("condition", "")
+            col_idx = ops._find_column_index(column) if column else None
+
+            affected_cells = []
+            affected_rows = []
+            headers = [cell.value for cell in ops.ws[1]]
+
+            for row in ops.ws.iter_rows(min_row=2):
+                cells_to_check = [row[col_idx - 1]] if col_idx else list(row)
+                if any(ops._eval_condition(c.value, condition) for c in cells_to_check):
+                    row_num = row[0].row
+                    affected_rows.append(row_num)
+                    for c in cells_to_check:
+                        if ops._eval_condition(c.value, condition):
+                            affected_cells.append(f"{c.coordinate}({c.value})")
+
+            ops.close()
+
+            action_desc = {
+                "conditional_format": f"将标色（{params.get('color', 'FF0000')}）",
+                "conditional_delete": "将被删除",
+                "conditional_filter": "将被筛选出",
+            }[op]
+
+            base["preview"] = {
+                "affected_count": len(affected_rows),
+                "affected_rows": affected_rows[:50],
+                "affected_cells": affected_cells[:50],
+                "summary": (
+                    f"满足条件「{condition}」的行共 {len(affected_rows)} 行，"
+                    f"涉及单元格：{', '.join(affected_cells[:10])}"
+                    + ("..." if len(affected_cells) > 10 else "")
+                    + f"，{action_desc}"
+                ) if affected_rows else f"没有找到满足条件「{condition}」的行",
+            }
+        except Exception as e:
+            base["preview"] = {"error": f"预览失败: {str(e)}"}
+
+    return base
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -594,8 +640,13 @@ async def get_supported_operations(file_type: str):
         {"type": "format_cell", "name": "格式化单元格", "description": "设置单元格样式"},
         {"type": "add_row", "name": "添加行", "description": "在指定位置添加新行"},
         {"type": "add_column", "name": "添加列", "description": "在指定位置添加新列"},
+        {"type": "delete_row", "name": "删除行", "description": "删除指定行"},
+        {"type": "delete_column", "name": "删除列", "description": "删除指定列"},
         {"type": "extract_table", "name": "提取表格", "description": "提取表格数据"},
         {"type": "calculate", "name": "数据计算", "description": "执行公式计算"},
+        {"type": "conditional_format", "name": "条件格式", "description": "对满足条件的单元格批量标色，如：把成绩高于90的标红"},
+        {"type": "conditional_delete", "name": "条件删除", "description": "删除满足条件的整行，如：删除成绩低于60的行"},
+        {"type": "conditional_filter", "name": "条件筛选", "description": "筛选满足条件的行（只读），如：找出包含'优秀'的行"},
     ]
     
     operations = {

@@ -38,6 +38,9 @@ class OperationType:
     DELETE_COLUMN = "delete_column"             # 删除列
     EXTRACT_TABLE = "extract_table"             # 提取表格
     CALCULATE = "calculate"                     # 计算
+    CONDITIONAL_FORMAT = "conditional_format"   # 条件格式（满足条件的单元格标色）
+    CONDITIONAL_DELETE = "conditional_delete"   # 条件删除（删除满足条件的行）
+    CONDITIONAL_FILTER = "conditional_filter"   # 条件筛选（提取满足条件的行）
 
     # 通用操作
     CONVERT_FORMAT = "convert_format"           # 格式转换
@@ -126,6 +129,27 @@ OPERATION_PATTERNS = {
         r"提取.*表格", r"导出.*数据", r"获取.*表格",
         r"提取.*工作表", r"提取.*数据", r"提取.*内容",
         r"获取.*工作表", r"提取.*工作表"
+    ],
+    OperationType.CONDITIONAL_FORMAT: [
+        r"高于.*标", r"低于.*标", r"大于.*标", r"小于.*标",
+        r"等于.*标", r"包含.*标", r"不为空.*标", r"为空.*标",
+        r"把.*高于.*[红蓝绿黄]", r"把.*低于.*[红蓝绿黄]",
+        r"把.*大于.*[红蓝绿黄]", r"把.*小于.*[红蓝绿黄]",
+        r"满足.*条件.*标", r"条件.*格式", r"条件格式",
+        r"高于\d+.*标", r"低于\d+.*标", r"大于\d+.*标", r"小于\d+.*标",
+    ],
+    OperationType.CONDITIONAL_DELETE: [
+        r"删除.*高于", r"删除.*低于", r"删除.*大于", r"删除.*小于",
+        r"删除.*等于", r"删除.*包含", r"删除.*为空", r"删除.*空白",
+        r"把.*高于.*删", r"把.*低于.*删", r"把.*空.*行.*删",
+        r"删掉.*空.*行", r"清除.*空.*行", r"删除空行",
+        r"满足.*条件.*删", r"条件.*删除",
+    ],
+    OperationType.CONDITIONAL_FILTER: [
+        r"筛选.*高于", r"筛选.*低于", r"筛选.*大于", r"筛选.*小于",
+        r"筛选.*等于", r"筛选.*包含", r"筛选.*为空",
+        r"过滤.*条件", r"找出.*高于", r"找出.*低于",
+        r"提取.*满足", r"列出.*高于", r"列出.*低于",
     ],
     OperationType.CONVERT_FORMAT: [
         r"转换.*格式", r"将.*转为", r"导出.*为",
@@ -428,7 +452,10 @@ class OperationParser:
             for op_type, patterns in OPERATION_PATTERNS.items():
                 if op_type in [OperationType.EDIT_CELL, OperationType.FORMAT_CELL,
                                OperationType.ADD_ROW, OperationType.ADD_COLUMN,
-                               OperationType.EXTRACT_TABLE, OperationType.CALCULATE]:
+                               OperationType.DELETE_ROW, OperationType.DELETE_COLUMN,
+                               OperationType.EXTRACT_TABLE, OperationType.CALCULATE,
+                               OperationType.CONDITIONAL_FORMAT, OperationType.CONDITIONAL_DELETE,
+                               OperationType.CONDITIONAL_FILTER]:
                     relevant_patterns[op_type] = patterns
         else:
             relevant_patterns = OPERATION_PATTERNS
@@ -734,6 +761,30 @@ position 参数支持：
 
 ## calculate: 执行公式计算
   示例："在D1单元格写入SUM公式" → calculate, formula="=SUM(A1:C1)", cell="D1"
+
+## conditional_format: 条件格式（对满足条件的单元格批量标色）
+  参数：column（列名或列号）、condition（条件：>90 / <60 / ==0 / contains:关键词 / empty）、color（十六进制颜色）
+  示例："把成绩列高于90分的标红" → conditional_format, column="成绩", condition=">90", color="FF0000"
+  示例："把分数低于60的标黄" → conditional_format, column="分数", condition="<60", color="FFFF00"
+  示例："把包含'优秀'的单元格标绿" → conditional_format, column=null, condition="contains:优秀", color="00FF00"
+
+## conditional_delete: 条件删除（删除满足条件的整行）
+  参数：column（列名或列号）、condition（条件同上）
+  示例："删除成绩低于60的行" → conditional_delete, column="成绩", condition="<60"
+  示例："删除空白行" → conditional_delete, column=null, condition="empty"
+  示例："把分数为0的行删掉" → conditional_delete, column="分数", condition="==0"
+
+## conditional_filter: 条件筛选（提取满足条件的行，不修改文件）
+  参数：column（列名或列号）、condition（条件同上）
+  示例："找出成绩高于90的学生" → conditional_filter, column="成绩", condition=">90"
+  示例："列出包含'北京'的行" → conditional_filter, column=null, condition="contains:北京"
+
+【条件格式说明】
+condition 参数格式：
+  ">90"、">=90"、"<60"、"<=60"、"==100"、"!=0"
+  "contains:关键词"（包含某字符串）
+  "empty"（单元格为空）
+  "not_empty"（单元格非空）
 
 【单元格引用格式】
 - 直接格式："A1"、"B2"、"C3"

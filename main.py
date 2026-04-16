@@ -24,6 +24,7 @@ async def lifespan(app: FastAPI):
     print("[OK] Database initialized")
     print(f"[OK] Server running: http://{settings.host}:{settings.port}")
     print(f"[OK] API docs:        http://{settings.host}:{settings.port}/docs")
+
     yield
     print("[STOP] Server shutting down")
 

@@ -585,6 +585,178 @@ class ExcelDocumentOperations:
         except Exception as e:
             return {'success': False, 'message': f'批量填充失败: {str(e)}'}
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # 操作：条件操作（条件格式 / 条件删除 / 条件筛选）
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _find_column_index(self, column: str) -> Optional[int]:
+        """
+        根据列名（表头文字）或列号字符串找到列索引（1-based）。
+        返回 None 表示未找到。
+        """
+        if not column:
+            return None
+        # 纯数字：直接当列号
+        if str(column).isdigit():
+            return int(column)
+        # 单个大写字母：A→1, B→2 ...
+        col_upper = str(column).strip().upper()
+        if re.match(r'^[A-Z]+$', col_upper):
+            idx = 0
+            for ch in col_upper:
+                idx = idx * 26 + (ord(ch) - ord('A') + 1)
+            return idx
+        # 按表头文字模糊匹配（第1行）
+        for cell in self.ws[1]:
+            if cell.value and str(column).strip() in str(cell.value):
+                return cell.column
+        return None
+
+    def _eval_condition(self, value, condition: str) -> bool:
+        """
+        判断单元格值是否满足条件字符串。
+        condition 格式：">90" / ">=90" / "<60" / "==0" / "!=0"
+                        "contains:关键词" / "empty" / "not_empty"
+        """
+        if condition == "empty":
+            return value is None or str(value).strip() == ""
+        if condition == "not_empty":
+            return value is not None and str(value).strip() != ""
+        if condition.startswith("contains:"):
+            keyword = condition[len("contains:"):]
+            return keyword in str(value) if value is not None else False
+
+        # 数值比较
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return False
+
+        m = re.match(r'^(>=|<=|!=|>|<|==)\s*(-?[\d.]+)$', condition.strip())
+        if not m:
+            return False
+        op, threshold = m.group(1), float(m.group(2))
+        return {
+            '>': num > threshold, '>=': num >= threshold,
+            '<': num < threshold, '<=': num <= threshold,
+            '==': num == threshold, '!=': num != threshold,
+        }.get(op, False)
+
+    def conditional_format(self, column: str, condition: str, color: str,
+                           sheet_name: str = None) -> Dict[str, Any]:
+        """
+        对满足条件的单元格批量设置字体颜色。
+
+        Args:
+            column:    列名（表头文字）或列号（"A"/"1"/数字），None 表示扫描所有列
+            condition: 条件字符串，如 ">90"、"contains:优秀"、"empty"
+            color:     十六进制颜色，如 "FF0000"
+            sheet_name: 工作表名，None 表示当前活动表
+        Returns:
+            操作结果，包含受影响的单元格列表
+        """
+        try:
+            ws = self.wb[sheet_name] if sheet_name else self.ws
+            col_idx = self._find_column_index(column) if column else None
+
+            affected = []
+            # 数据从第2行开始（跳过表头）
+            for row in ws.iter_rows(min_row=2):
+                cells_to_check = [row[col_idx - 1]] if col_idx else list(row)
+                for cell in cells_to_check:
+                    if self._eval_condition(cell.value, condition):
+                        existing = cell.font
+                        cell.font = Font(
+                            color=color,
+                            bold=existing.bold if existing else False,
+                            italic=existing.italic if existing else False,
+                            size=existing.size if existing else None,
+                            name=existing.name if existing else None,
+                        )
+                        affected.append(f"{cell.coordinate}({cell.value})")
+
+            self.wb.save(self.file_path)
+            return {
+                'success': True,
+                'message': f'条件格式完成，共影响 {len(affected)} 个单元格',
+                'affected_cells': affected,
+                'affected_count': len(affected),
+            }
+        except Exception as e:
+            return {'success': False, 'message': f'条件格式失败: {str(e)}'}
+
+    def conditional_delete(self, column: str, condition: str,
+                           sheet_name: str = None) -> Dict[str, Any]:
+        """
+        删除满足条件的整行。
+
+        Args:
+            column:    列名或列号，None 表示只要该行任意单元格满足条件即删除
+            condition: 条件字符串
+            sheet_name: 工作表名
+        Returns:
+            操作结果
+        """
+        try:
+            ws = self.wb[sheet_name] if sheet_name else self.ws
+            col_idx = self._find_column_index(column) if column else None
+
+            # 从后往前删，避免行号偏移
+            rows_to_delete = []
+            for row in ws.iter_rows(min_row=2):
+                cells_to_check = [row[col_idx - 1]] if col_idx else list(row)
+                if any(self._eval_condition(c.value, condition) for c in cells_to_check):
+                    rows_to_delete.append(row[0].row)
+
+            for row_num in reversed(rows_to_delete):
+                ws.delete_rows(row_num)
+
+            self.wb.save(self.file_path)
+            return {
+                'success': True,
+                'message': f'条件删除完成，共删除 {len(rows_to_delete)} 行',
+                'deleted_rows': rows_to_delete,
+                'deleted_count': len(rows_to_delete),
+            }
+        except Exception as e:
+            return {'success': False, 'message': f'条件删除失败: {str(e)}'}
+
+    def conditional_filter(self, column: str, condition: str,
+                           sheet_name: str = None) -> Dict[str, Any]:
+        """
+        筛选满足条件的行（只读，不修改文件）。
+
+        Args:
+            column:    列名或列号，None 表示扫描所有列
+            condition: 条件字符串
+            sheet_name: 工作表名
+        Returns:
+            匹配的行数据列表
+        """
+        try:
+            ws = self.wb[sheet_name] if sheet_name else self.ws
+            col_idx = self._find_column_index(column) if column else None
+
+            # 读取表头
+            headers = [cell.value for cell in ws[1]]
+
+            matched_rows = []
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                cells_to_check = [row[col_idx - 1]] if col_idx else list(row)
+                if any(self._eval_condition(v, condition) for v in cells_to_check):
+                    row_dict = {str(headers[i]): row[i] for i in range(len(headers)) if i < len(row)}
+                    matched_rows.append(row_dict)
+
+            return {
+                'success': True,
+                'message': f'筛选完成，共找到 {len(matched_rows)} 行',
+                'rows': matched_rows,
+                'count': len(matched_rows),
+                'headers': [str(h) for h in headers if h is not None],
+            }
+        except Exception as e:
+            return {'success': False, 'message': f'条件筛选失败: {str(e)}'}
+
     def close(self):
         """关闭工作簿"""
         self.wb.close()

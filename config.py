@@ -31,8 +31,10 @@ class Settings(BaseSettings):
     # 为空则 PDF 也走 llm_model（与旧版行为一致）
     pdf_vlm_model: str = ""
 
-    # 嵌入模型（本地 Ollama，nomic-embed-text 是 Ollama 内置的优质 Embedding 模型）
-    embed_model: str = "nomic-embed-text"
+    # 嵌入模型配置（独立于 LLM，可使用不同的服务商）
+    embed_api_key:  str = ""                            # Embedding API Key（硅基流动填 sk-xxx，本地 Ollama 填 ollama 或留空）
+    embed_base_url: str = "http://localhost:11434"      # Embedding 服务地址（不含 /v1）
+    embed_model:    str = "nomic-embed-text"            # Embedding 模型名
 
     # 数据库路径（自动转为绝对路径，解决从任意目录启动找不到数据库的问题）
     @property

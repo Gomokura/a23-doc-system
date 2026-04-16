@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated } from 'vue'
 import { ElMessage } from 'element-plus'
 import { parseResponseJson } from '@/utils/parseApiResponse'
 import { useQueryStore } from '@/stores/query'
@@ -86,6 +86,7 @@ const handleQuery = async () => {
 
   loading.value = true
   expandedSources.value.clear()
+  store.clearResult()
 
   try {
     const response = await fetch('/api/ask', {
@@ -207,6 +208,11 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null
 onMounted(() => {
   handleRefresh()
   refreshTimer = setInterval(handleRefresh, 10000)
+})
+
+onActivated(() => {
+  // 每次切回问答 tab 时清空上次结果，避免误导
+  store.clearResult()
 })
 
 onUnmounted(() => {

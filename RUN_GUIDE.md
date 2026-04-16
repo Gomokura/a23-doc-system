@@ -1,13 +1,13 @@
-# 智能文档系统 - 运行指南
+# 运行指南
 
 ## 目录
 
 - [环境要求](#环境要求)
-- [第一步：安装 Ollama](#第一步安装-ollama)
-- [第二步：下载 AI 模型](#第二步下载-ai-模型)
-- [第三步：配置项目](#第三步配置项目)
-- [第四步：安装依赖](#第四步安装依赖)
-- [第五步：启动服务](#第五步启动服务)
+- [第一步：配置 API Key](#第一步配置-api-key)
+- [第二步：安装后端依赖](#第二步安装后端依赖)
+- [第三步：启动后端](#第三步启动后端)
+- [第四步：安装并启动前端](#第四步安装并启动前端)
+- [访问系统](#访问系统)
 - [常见问题](#常见问题)
 
 ---
@@ -17,201 +17,108 @@
 | 项目 | 要求 |
 |------|------|
 | 操作系统 | Windows 10/11、macOS、Linux |
-| 内存 | 最低 8GB（推荐 16GB） |
-| 磁盘空间 | 至少 10GB 可用空间 |
-| Python | 3.10 或更高版本 |
+| Python | 3.11+（推荐 3.11） |
+| Node.js | 18+（用于前端） |
+| 内存 | 最低 4GB（无需本地 GPU） |
+| 网络 | 需要访问 SiliconFlow API（国内可直连） |
+
+> 本系统使用云端 LLM/VLM/Embedding API，**不需要本地 GPU，不需要安装 Ollama**。
 
 ---
 
-## 第一步：安装 Ollama
+## 第一步：配置 API Key
 
-Ollama 是本地运行 AI 模型的工具。
+编辑项目根目录下的 `config.py`，填入你的 SiliconFlow API Key：
 
-### Windows/Mac
-
-1. 访问 https://ollama.com/download
-2. 下载并安装对应版本
-3. 安装完成后，Ollama 会自动在后台运行
-
-### Linux
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
+```python
+llm_api_key: str = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
-### 验证安装
+SiliconFlow 注册地址：https://cloud.siliconflow.cn
+注册后在「API 密钥」页面创建 Key，新用户有免费额度。
 
-```bash
-ollama --version
-```
+其余配置项一般无需修改，默认值如下：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `llm_model` | `Qwen/Qwen2.5-72B-Instruct` | 问答/填表主模型 |
+| `vlm_model` | `Qwen/Qwen2-VL-72B-Instruct` | 扫描件 PDF OCR |
+| `embed_model` | `BAAI/bge-m3` | 向量检索 Embedding |
+| `host` | `0.0.0.0` | 后端监听地址 |
+| `port` | `8000` | 后端端口 |
 
 ---
 
-## 第二步：下载 AI 模型
-
-打开终端（Windows 用 PowerShell 或 CMD），依次运行以下命令：
+## 第二步：安装后端依赖
 
 ```bash
-# 1. 下载文本处理模型（用于问答、摘要、实体抽取）
-ollama pull qwen2.5:1.5b
-
-# 2. 下载视觉模型（用于 PDF 图片识别，可选）
-ollama pull qwen2.5vl:3b
-
-# 3. 下载文本嵌入模型（用于文档检索）
-ollama pull nomic-embed-text
-```
-
-> **注意**：如果网络较慢，可以使用代理或科学上网。模型下载需要一些时间。
-
-### 验证模型
-
-```bash
-ollama list
-```
-
-应该看到：
-```
-NAME                ID          SIZE      MODIFIED
-qwen2.5:1.5b       xxx         986 MB    ...
-qwen2.5vl:3b       xxx         3.2 GB    ...
-nomic-embed-text    xxx         274 MB    ...
-```
-
----
-
-## 第三步：配置项目
-
-### 3.1 下载项目代码
-
-```bash
-git clone https://github.com/Gomokura/a23-doc-system.git
-cd a23-doc-system
-git checkout feat/retriever-lhh
-```
-
-### 3.2 复制环境配置文件
-
-```bash
-# 在项目根目录下
-copy .env.example .env    # Windows
-# 或
-cp .env.example .env     # Linux/Mac
-```
-
-### 3.3 编辑 .env 文件
-
-用文本编辑器打开 `.env` 文件，配置如下：
-
-```env
-# LLM 配置（使用 Ollama 本地部署，完全免费）
-LLM_API_KEY=ollama
-LLM_BASE_URL=http://localhost:11434/v1
-LLM_MODEL=qwen2.5:1.5b
-
-# PDF 视觉模型（留空则用文本模型处理 PDF）
-PDF_VLM_MODEL=qwen2.5vl:3b
-
-# 嵌入模型
-EMBED_MODEL=nomic-embed-text
-
-# 数据库路径
-CHROMA_PATH=./db/chroma
-SQLITE_PATH=./db/app.db
-
-# 文件目录
-UPLOAD_DIR=./uploads
-OUTPUT_DIR=./outputs
-
-# 服务配置
-HOST=0.0.0.0
-PORT=8000
-```
-
----
-
-## 第四步：安装依赖
-
-### 4.1 创建虚拟环境
-
-```bash
-# 创建虚拟环境
+# 1. 创建虚拟环境
 python -m venv venv
 
-# 激活虚拟环境
+# 2. 激活虚拟环境
 # Windows PowerShell:
 .\venv\Scripts\activate
 # Windows CMD:
 venv\Scripts\activate.bat
 # Linux/Mac:
 source venv/bin/activate
-```
 
-### 4.2 安装 Python 包
-
-```bash
+# 3. 安装依赖
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-> **注意**：如果安装失败，尝试：
-> ```bash
-> pip install --no-cache-dir -r requirements.txt
-> ```
-
-### 4.3 安装前端依赖
+如果安装较慢，可使用国内镜像：
 
 ```bash
-cd modules/frontend
-npm install
-cd ../..
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 ---
 
-## 第五步：启动服务
+## 第三步：启动后端
 
-### 5.1 确保 Ollama 运行中
+**Windows（推荐）：** 直接双击 `start_backend.bat`
 
-```bash
-ollama serve
-```
-
-如果没有报错，说明 Ollama 正在运行。
-
-### 5.2 启动后端服务
-
-新开一个终端窗口：
+**命令行：**
 
 ```bash
-# 激活虚拟环境
-.\venv\Scripts\activate   # Windows
-# 或
-source venv/bin/activate   # Linux/Mac
-
-# 启动服务
-python -m uvicorn main:app --reload --port 8000 --host 0.0.0.0
+# 确保虚拟环境已激活
+python main.py
 ```
 
-看到以下信息说明启动成功：
+看到以下输出说明启动成功：
+
 ```
 INFO:     Uvicorn running on http://0.0.0.0:8000
 INFO:     Application startup complete.
 ```
 
-### 5.3 启动前端（可选）
+首次启动时，系统会自动创建 SQLite 数据库和 ChromaDB 向量库目录，无需手动初始化。
 
-再开一个终端窗口：
+---
+
+## 第四步：安装并启动前端
+
+新开一个终端窗口：
 
 ```bash
 cd modules/frontend
+npm install
 npm run dev
 ```
 
-看到以下信息说明启动成功：
+看到以下输出说明启动成功：
+
 ```
-VITE ready in xxx ms
-Local: http://localhost:5173/
+VITE v6.x.x  ready in xxx ms
+➜  Local:   http://localhost:5173/
+```
+
+如果 npm 安装较慢，可使用淘宝镜像：
+
+```bash
+npm install --registry=https://registry.npmmirror.com
 ```
 
 ---
@@ -222,102 +129,76 @@ Local: http://localhost:5173/
 |------|------|
 | 前端界面 | http://localhost:5173 |
 | 后端 API | http://localhost:8000 |
-| API 文档 | http://localhost:8000/docs |
+| API 文档（Swagger） | http://localhost:8000/docs |
 | 健康检查 | http://localhost:8000/health |
+
+---
+
+## 使用流程
+
+```
+1. 上传页面  →  上传文档（docx/xlsx/pdf/txt/md），点击「解析」等待索引完成
+2. 问答页面  →  选择文档，输入问题，获取答案与溯源
+3. 填表页面  →  上传模板，选择数据源，输入筛选条件，预览后确认填写，下载结果
+4. 文档操作  →  选择文件，输入自然语言指令（如"删除成绩小于60的行"），预览后执行
+```
 
 ---
 
 ## 常见问题
 
-### Q1: Ollama 下载模型失败
+### Q1: API Key 无效 / 401 错误
 
-**解决方法**：
-1. 确保网络畅通
-2. 使用代理：
-   ```bash
-   # Windows PowerShell
-   $env:HTTPS_PROXY = "http://127.0.0.1:7890"
-   # Linux/Mac
-   export HTTPS_PROXY="http://127.0.0.1:7890"
-   ```
-3. 手动下载模型文件
+检查 `config.py` 中的 `llm_api_key` 是否正确填写，注意不要有多余空格。
+SiliconFlow 控制台确认 Key 状态正常且有余额。
 
 ### Q2: pip 安装依赖失败
 
-**解决方法**：
-1. 升级 pip：`pip install --upgrade pip`
-2. 使用国内镜像：
-   ```bash
-   pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-   ```
+```bash
+# 升级 pip 后重试
+pip install --upgrade pip
+pip install -r requirements.txt --no-cache-dir
+```
 
-### Q3: 内存不足 (Out of Memory)
+### Q3: 端口被占用
 
-**解决方法**：
-1. 关闭其他占用内存的程序
-2. 减小 Ollama 模型大小：
-   ```bash
-   ollama pull qwen2.5:0.5b   # 使用更小的模型
-   ```
-3. 在 .env 中注释掉 PDF_VLM_MODEL（跳过 PDF 图片识别）
+```bash
+# Windows 查找占用 8000 端口的进程
+netstat -ano | findstr :8000
+# 关闭该进程，或修改 config.py 中的 port 值
+```
 
-### Q4: 端口被占用
+前端端口冲突时，修改 `modules/frontend/vite.config.ts` 中的 `server.port`。
 
-**解决方法**：
-1. 查找占用端口的进程：
-   ```bash
-   # Windows
-   netstat -ano | findstr :8000
-   # Linux/Mac
-   lsof -i :8000
-   ```
-2. 关闭该进程或使用其他端口：
-   ```bash
-   python -m uvicorn main:app --port 8001
-   ```
+### Q4: 前端 npm install 失败
 
-### Q5: 前端 npm install 失败
+```bash
+cd modules/frontend
+rm -rf node_modules
+npm cache clean --force
+npm install --registry=https://registry.npmmirror.com
+```
 
-**解决方法**：
-1. 清理缓存：
-   ```bash
-   npm cache clean --force
-   rm -rf node_modules
-   npm install
-   ```
-2. 使用淘宝镜像：
-   ```bash
-   npm install --registry=https://registry.npmmirror.com
-   ```
+### Q5: 换了 Embedding 模型后报维度错误
 
-### Q6: 找不到模块 'xxx'
+系统会自动检测维度变化并重建索引，无需手动操作。如果仍有问题，删除 `db/chroma/` 目录后重启后端即可。
 
-**解决方法**：
-1. 确保虚拟环境已激活（激活后命令行前有 `(venv)` 标记）
-2. 重新安装依赖：
-   ```bash
-   pip install -r requirements.txt
-   ```
+### Q6: 扫描件 PDF 识别效果差
 
-### Q7: 服务启动后无法访问
+扫描件走云端 VLM（Qwen2-VL-72B）OCR，识别准确率约 85%。确保网络正常、API 余额充足。文字型 PDF 走 PyMuPDF 直接提取，准确率接近 100%。
 
-**解决方法**：
-1. 检查防火墙设置
-2. 确保使用正确地址：
-   - 本机访问：http://localhost:8000
-   - 局域网访问：http://你的IP地址:8000
+### Q7: 填表响应时间较长
+
+- xlsx 数据源：行筛选约 8-10s（LLM 解析意图 1 次 + pandas 执行）
+- 纯文字 docx 数据源：并发批量提取，约 15-30s（取决于段落数量）
+- 多表模板：每个表格独立筛选，时间随表格数量线性增加
 
 ---
 
-## 快速检查清单
+## 启动前检查清单
 
-运行前确认以下项目：
-
-- [ ] Ollama 已安装并运行
-- [ ] 已下载所有模型（`ollama list`）
-- [ ] 已创建虚拟环境
-- [ ] 已安装 Python 依赖
-- [ ] .env 文件已配置
-- [ ] 端口 8000 和 5173 未被占用
-
----
+- [ ] `config.py` 中已填入有效的 SiliconFlow API Key
+- [ ] Python 虚拟环境已激活，依赖已安装
+- [ ] 后端已启动（http://localhost:8000/health 返回 200）
+- [ ] 前端已启动（http://localhost:5173 可访问）
+- [ ] 端口 8000 和 5173 未被其他程序占用

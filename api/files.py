@@ -20,17 +20,6 @@ from errors import AppError
 
 router = APIRouter(tags=["文件管理"])
 
-# ── ChromaDB 单例，避免每次请求重建 client ─────────────────────
-_chroma_collection = None
-
-def _get_chroma_collection():
-    global _chroma_collection
-    if _chroma_collection is None:
-        import chromadb
-        client = chromadb.PersistentClient(path=settings.chroma_path)
-        _chroma_collection = client.get_or_create_collection("documents")
-    return _chroma_collection
-
 
 # ── 状态枚举，防止非法值 ───────────────────────────────────────
 class FileStatus(str, Enum):
@@ -99,11 +88,11 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
     if os.path.exists(record.file_path):
         os.remove(record.file_path)
 
-    # 2. 删除 ChromaDB 向量（复用单例 client）
+    # 2. 删除 ChromaDB 向量 + BM25 索引（统一走 indexer）
     if record.status == "indexed":
         try:
-            collection = _get_chroma_collection()
-            collection.delete(where={"file_id": file_id})
+            from modules.retriever.indexer import delete_index
+            delete_index(file_id)
         except Exception:
             pass
 
@@ -138,13 +127,13 @@ async def reparse_file(file_id: str, db: Session = Depends(get_db)):
     if not os.path.exists(record.file_path):
         raise AppError(400, "FILE_NOT_FOUND_ON_DISK", f"原始文件不存在: {record.file_path}，请重新上传")
 
-    # 1. 删除 ChromaDB 旧向量
+    # 1. 删除旧向量和 BM25 索引（统一走 indexer，避免双客户端冲突）
     if record.status == "indexed":
         try:
-            collection = _get_chroma_collection()
-            collection.delete(where={"file_id": file_id})
+            from modules.retriever.indexer import delete_index
+            delete_index(file_id)
         except Exception as e:
-            pass  # 无旧索引时 ChromaDB 会报错，忽略
+            pass  # 无旧索引时忽略
 
     # 2. 清除该文件的问答缓存
     try:

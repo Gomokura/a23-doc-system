@@ -184,8 +184,8 @@ def _normalize_answer_text(raw: str) -> str:
 
 
 def _build_prompt(query: str, chunks: list, scenario: str = "default") -> str:
-    CHUNK_MAX_CHARS = 3000
-    CONTEXT_MAX_CHARS = 8000
+    CHUNK_MAX_CHARS = 12000
+    CONTEXT_MAX_CHARS = 32000
 
     # ⚠️ M3-005 修复: 句子边界切割函数，避免在句子中间截断
     def _truncate_at_sentence(text: str, max_chars: int) -> str:
@@ -569,7 +569,7 @@ def _load_file_as_chunks(file_paths: list, file_name_map: dict = None) -> list:
     file_name_map: {磁盘路径: 真实文件名}，优先用真实文件名展示
     """
     chunks = []
-    max_chunks = getattr(settings, "top_k", 10)  # 总 chunk 数不超过 TOP_K
+    max_chunks = 50  # 结构化文件允许更多 chunk
 
     for fp in file_paths:
         # 优先使用数据库中的真实文件名，避免显示 UUID 磁盘名
@@ -597,22 +597,14 @@ def _load_file_as_chunks(file_paths: list, file_name_map: dict = None) -> list:
             if df.empty:
                 continue
 
-            # 找分类列去重
-            dedup_col = None
-            for col in df.columns:
-                nunique = df[col].nunique()
-                if 1 < nunique < min(200, len(df) * 0.3):
-                    dedup_col = col
-                    break
-
-            sample_df = (df.drop_duplicates(subset=[dedup_col])
-                         if dedup_col else df.sample(n=min(50, len(df)), random_state=42))
+            # 直接取全部行，不做去重或采样，保证数据完整
+            sample_df = df
 
             # 把所有行合并成 CSV 格式的单个 chunk，而不是每行一个 chunk
             # 这样 LLM 看到的是完整的表格，来源只有 1 个文件
             csv_text = sample_df.to_csv(index=False)
-            # 若内容太长则切成 2 个 chunk
-            chunk_size = 3000
+            # 结构化文件用更大的 chunk_size，保证完整性
+            chunk_size = 12000
             for ci, start in enumerate(range(0, len(csv_text), chunk_size)):
                 piece = csv_text[start:start + chunk_size]
                 chunks.append({

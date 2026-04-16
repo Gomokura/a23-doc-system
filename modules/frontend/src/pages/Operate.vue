@@ -26,6 +26,13 @@ interface PreviewResult {
     parameters?: Record<string, unknown>
     reasoning?: string
   }
+  preview?: {
+    affected_count?: number
+    affected_rows?: number[]
+    affected_cells?: string[]
+    summary?: string
+    error?: string
+  }
   supported?: boolean
 }
 
@@ -55,6 +62,9 @@ const quickPrompts = [
   '把第二段加粗并设为红色',
   '提取所有表格内容',
   '删除最后一段',
+  '把成绩列高于90分的标红',
+  '删除成绩低于60的行',
+  '筛选出包含"优秀"的行',
 ]
 
 const selectedFile = computed(() => files.value.find(f => f.file_id === selectedFileId.value) || null)
@@ -124,7 +134,7 @@ async function handlePreview() {
     const res = await fetch('/api/document/preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ instruction: instruction.value.trim(), file_type: selectedFileType.value }),
+      body: JSON.stringify({ file_id: selectedFileId.value, instruction: instruction.value.trim() }),
     })
     const data = (await parseResponseJson(res)) as PreviewResult & { detail?: string }
     if (!res.ok) throw new Error(data.detail || `预览失败 (${res.status})`)
@@ -278,6 +288,16 @@ onMounted(loadFiles)
               <div>
                 <div class="text-muted mb-2">预览说明</div>
                 <div class="text-text2 leading-6 bg-white border border-border rounded-md p-3">{{ previewResult.parsed_operation?.reasoning || '后端未返回额外说明。' }}</div>
+              </div>
+              <div v-if="previewResult.preview">
+                <div class="text-muted mb-2">影响范围（dry-run）</div>
+                <div v-if="previewResult.preview.error" class="text-red text-xs bg-red/5 border border-red/20 rounded-md p-3">{{ previewResult.preview.error }}</div>
+                <div v-else class="bg-white border border-border rounded-md p-3 space-y-1">
+                  <div class="text-sm font-medium text-text">{{ previewResult.preview.summary }}</div>
+                  <div v-if="previewResult.preview.affected_cells?.length" class="text-xs text-muted font-mono mt-2">
+                    {{ previewResult.preview.affected_cells.slice(0, 20).join('  ') }}{{ (previewResult.preview.affected_cells.length ?? 0) > 20 ? ' ...' : '' }}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
